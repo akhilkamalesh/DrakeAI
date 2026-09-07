@@ -1,0 +1,62 @@
+[
+    {
+        "song_id": "27tNWlJeNuIJbY0OM63Z2W",
+        "acousticness": 0.35,
+        "danceability": 0.63,
+        "energy": 0.57,
+        "instrumentalness": 0.0,
+        "key": 6,
+        "liveness": 0.08,
+        "loudness": -7.1,
+        "mode": 0,
+        "speechiness": 0.11,
+        "tempo": 152.0,
+        "time_signature": 4,
+        "valence": 0.44
+    },
+    {
+        "song_id": "3jq620G6eB96ZJ5G1Xn85s",
+        "acousticness": 0.03,
+        "danceability": 0.79,
+        "energy": 0.52,
+        "instrumentalness": 0.0,
+        "key": 8,
+        "liveness": 0.16,
+        "loudness": -7.8,
+        "mode": 1,
+        "speechiness": 0.16,
+        "tempo": 86.0,
+        "time_signature": 4,
+        "valence": 0.51
+    },
+    {
+        "song_id": "0G21yYKMzoeg4glqEqjNvc",
+        "acousticness": 0.01,
+        "danceability": 0.89,
+        "energy": 0.62,
+        "instrumentalness": 0.0001,
+        "key": 2,
+        "liveness": 0.05,
+        "loudness": -4.9,
+        "mode": 1,
+        "speechiness": 0.06,
+        "tempo": 135.0,
+        "time_signature": 4,
+        "valence": 0.55
+    },
+    {
+        "song_id": "6DCZqySq6xGg8H3aE5V5u5",
+        "acousticness": 0.03,
+        "danceability": 0.75,
+        "energy": 0.45,
+        "instrumentalness": 0.0001,
+        "key": 7,
+        "liveness": 0.55,
+        "loudness": -9.2,
+        "mode": 1,
+        "speechiness": 0.1,
+        "tempo": 77.1,
+        "time_signature": 4,
+        "valence": 0.36
+    }
+]

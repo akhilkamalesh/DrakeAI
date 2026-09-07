@@ -58,8 +58,12 @@ venv.bak/
 # Local environment variables
 .env*.local
 
-# Data caches / staging folder
-data/raw_audio_features.json
+# Data caches / staging folder / large datasets
+data/raw_*.json
+data/stanza.json
+data/tracks.json
+data/albums.json
+!data/mock/
 
 # IDE / Editor configuration
 .vscode/

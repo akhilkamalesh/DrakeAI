@@ -1,0 +1,34 @@
+[
+    {
+        "id": "4eLPsYPBmKkvIiYbbCY2Nq",
+        "name": "Take Care",
+        "album_type": "album",
+        "images_url": "https://open.spotify.com/image/take_care_cover",
+        "release_date": "2011-11-15",
+        "total_tracks": 18
+    },
+    {
+        "id": "7tyx094Wmq3s71575UaU6t",
+        "name": "Nothing Was the Same",
+        "album_type": "album",
+        "images_url": "https://open.spotify.com/image/nwts_cover",
+        "release_date": "2013-09-24",
+        "total_tracks": 13
+    },
+    {
+        "id": "40GMAh5YJ6w58o6V2o77Qo",
+        "name": "Views",
+        "album_type": "album",
+        "images_url": "https://open.spotify.com/image/views_cover",
+        "release_date": "2016-04-29",
+        "total_tracks": 20
+    },
+    {
+        "id": "1t5bM41M4k2sXWw8UeJ4Ld",
+        "name": "Scorpion",
+        "album_type": "album",
+        "images_url": "https://open.spotify.com/image/scorpion_cover",
+        "release_date": "2018-06-29",
+        "total_tracks": 25
+    }
+]
