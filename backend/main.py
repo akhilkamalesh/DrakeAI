@@ -189,7 +189,7 @@ async def chat_stream_endpoint(request: ChatRequest):
                             },
                             "metadata_limits": {
                                 "limit": mf.get("limit", 3),
-                                "personal_feel": mf.get("personal_feel"),
+                                "personal_feel": None,
                                 "release_year_before": mf.get("release_year_before"),
                                 "release_year_after": mf.get("release_year_after"),
                                 "album_name": mf.get("album_name")

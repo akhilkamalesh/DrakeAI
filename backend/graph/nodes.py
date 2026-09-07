@@ -135,13 +135,8 @@ def _heuristic_guardrail_and_intent(prompt: str) -> IntentOutput:
             metadata_filters=MetadataFilters()
         )
 
-    # Personal feel detection
+    # Personal feel detection is deprecated; mood is captured dynamically via semantic expansion & acoustics
     detected_feel = None
-    for cat in SUPPORTED_PERSONAL_FEELS:
-        cat_words = cat.lower().replace("/", " ").replace("-", " ").split()
-        if any(word in prompt_lower for word in cat_words if len(word) > 3):
-            detected_feel = cat
-            break
 
     # Year detection
     year_before = None
@@ -263,19 +258,13 @@ def _extract_query_keywords(prompt: str) -> List[str]:
     prompt_lower = prompt.lower()
     keywords = []
 
-    # 1. Check known categories / vibes
-    for cat in SUPPORTED_PERSONAL_FEELS:
-        if any(w.lower() in prompt_lower for w in cat.split() if len(w) > 3):
-            if cat not in keywords:
-                keywords.append(cat)
-
-    # 2. Check albums
+    # 1. Check albums
     for alb in KNOWN_ALBUMS:
         if alb.lower() in prompt_lower:
             if f"Album: {alb}" not in keywords:
                 keywords.append(f"Album: {alb}")
 
-    # 3. Emotional / vibe descriptor words
+    # 2. Emotional, thematic, and acoustic descriptor words
     theme_words = [
         "saddest", "sad", "heartbreak", "heartbroken", "crying", "tears", "gutwrenching",
         "introspective", "late night", "confessional", "flex", "triumphant", "banger", "hype",
@@ -321,7 +310,6 @@ def guardrail_intent_node(state: AgentState) -> Dict[str, Any]:
         "   - semantic_query: Deeply expanded, rich semantic search statement engineered to maximize cosine similarity against vector embeddings.\n"
         "     DO NOT merely repeat the prompt. Expand core emotions, synonyms, definitions, and lyrical examples.\n"
         "   - metadata_filters:\n"
-        f"     - personal_feel: null or EXACTLY ONE of: {json.dumps(SUPPORTED_PERSONAL_FEELS)}\n"
         "     - release_year_before: null or integer\n"
         "     - release_year_after: null or integer\n"
         "     - album_name: null or album string\n"
@@ -420,22 +408,22 @@ def _heuristic_vet_track(
 ) -> TrackVettingResult:
     """
     Deterministic fallback verifier when LLM is unavailable or offline.
-    Examines similarity score, vibe consistency, audio features, and keyword presence.
+    Examines similarity score, lyrics sentiment, audio features, and keyword presence.
     """
     prompt_lower = (prompt + " " + (semantic_query or "")).lower()
-    feel = (candidate.get("personal_feel") or "").lower()
     lyrics = (candidate.get("track_lyrics") or candidate.get("lyric_chunk") or "").lower()
     sim = float(candidate.get("similarity") or 0.0)
     val = candidate.get("valence")
+    energy = candidate.get("energy")
 
-    # Contradiction check: user asks for heartbreak / gutwrenching, but track is upbeat or club anthem
+    # Contradiction check: user asks for heartbreak / gutwrenching, but track is upbeat or high energy with no sad lyrics
     sad_keywords = ["gutwrenching", "heartbreak", "sad", "crying", "tears", "pain", "sorrow", "alone", "regret"]
     if any(k in prompt_lower for k in sad_keywords):
         reasons = []
-        if feel in ["the club anthem", "hard-hitting / mob tie"] and not any(k in lyrics for k in ["cry", "tears", "heartbreak", "alone", "hurt"]):
-            reasons.append(f"vibe is '{candidate.get('personal_feel')}'")
         if val is not None and float(val) > 0.65 and not any(k in lyrics for k in ["cry", "tears", "heartbreak", "alone", "hurt"]):
             reasons.append(f"high musical valence ({float(val):.2f})")
+        if energy is not None and float(energy) > 0.80 and not any(k in lyrics for k in ["cry", "tears", "heartbreak", "alone", "hurt"]):
+            reasons.append(f"high energy tempo ({float(energy):.2f})")
         if reasons:
             return TrackVettingResult(
                 is_match=False,
@@ -488,7 +476,7 @@ def vet_track_node(state: AgentState) -> Dict[str, Any]:
         "Your role is to strictly verify whether the entire track genuinely matches the user's prompt, emotional intent, "
         "and requested musical vibe/features, or if the child stanza was a false-positive or superficial keyword match.\n\n"
         "Evaluation Guidelines:\n"
-        "1. Compare the user query and expanded semantic intent against the candidate track's title, vibe, album, audio features, and full lyrics.\n"
+        "1. Compare the user query and expanded semantic intent against the candidate track's title, album, audio features, and full lyrics.\n"
         "2. If the user asks for a specific theme (e.g. 'gutwrenching' heartbreak, or high-energy hype), check whether "
         "the track as an artistic whole and its musical acoustics embody that theme.\n"
         "3. Respond ONLY with a valid JSON object matching the schema:\n"
@@ -524,8 +512,7 @@ def vet_track_node(state: AgentState) -> Dict[str, Any]:
             f"User Prompt: {prompt}\n"
             f"Semantic Query / Expanded Themes: {semantic_query}\n\n"
             f"Candidate Track: {tname}\n"
-            f"Album: {aname}\n"
-            f"Vibe / Category: {feel}{af_str}\n"
+            f"Album: {aname}{af_str}\n"
             f"Matched Stanza (Child Chunk):\n{child_stanzas}\n\n"
             f"Full Parent Track Lyrics:\n{full_lyrics[:4000]}"
         )
@@ -698,20 +685,16 @@ def _heuristic_reasoning(prompt: str, retrieved_context: List[Dict[str, Any]]) -
 
     tracks_seen = set()
     rationales: Dict[str, str] = {}
-    feels: List[str] = []
     albums: List[str] = []
 
     for row in retrieved_context:
         tname = row.get("track_name", "Unknown Track")
         aname = row.get("album_name", "Unknown Album")
-        feel = row.get("personal_feel") or "Introspective"
         year = str(row.get("release_date", ""))[:4]
         year_str = f" ({year})" if year else ""
         lyric = (row.get("lyric_chunk") or "").strip()
         first_line = lyric.splitlines()[0] if lyric else ""
 
-        if feel not in feels:
-            feels.append(feel)
         if aname not in albums:
             albums.append(aname)
 
@@ -719,19 +702,17 @@ def _heuristic_reasoning(prompt: str, retrieved_context: List[Dict[str, Any]]) -
             tracks_seen.add(tname)
             snippet_ref = f' "{first_line[:65]}..."' if first_line else ""
             rationale = (
-                f"Selected from '{aname}'{year_str} under the '{feel}' category. "
-                f"Drake expresses quintessential {feel.lower()} sentiment here{snippet_ref}, "
-                f"aligning with the themes and emotional tone of your query."
+                f"Man, '{tname}' off '{aname}'{year_str} was a really honest moment for me. "
+                f"When I wrote{snippet_ref}, I was putting my real feelings out there—dealing "
+                f"with the exact headspace and emotion you're asking about."
             )
             rationales[tname] = rationale
 
-    album_list = ", ".join(f"'{a}'" for a in albums[:3])
-    feel_list = ", ".join(feels[:2]) if feels else "introspective reflection"
+    album_list = ", ".join(f"'{a}'" for a in albums[:3]) if albums else "my catalog"
     thematic_analysis = (
-        f"Across these selections from Drake's discography (including {album_list}), "
-        f"the stanzas explore nuanced dimensions of {feel_list.lower()}. "
-        f"Rather than superficial commentary, Drake candidly addresses personal ambition, relationships, "
-        f"and emotional guardrails, providing a direct lyrical match to your query."
+        f"Looking back across these records—especially from {album_list}—I was really tapping into "
+        f"what I was living through in that moment. Whether it's those late night 4 AM thoughts, relationship trust, "
+        f"or just sitting with my own thoughts, these tracks speak directly to what's on your mind."
     )
 
     return {
@@ -833,7 +814,6 @@ def reasoning_agent_node(state: AgentState) -> Dict[str, Any]:
             f"[Document {idx}]\n"
             f"Track: {row.get('track_name')}\n"
             f"Album: {row.get('album_name')} ({row.get('release_date', 'Unknown')})\n"
-            f"Vibe / Category: {row.get('personal_feel', 'N/A')}\n"
             f"{af_text}"
             f"Matched Child Stanza:\n{row.get('lyric_chunk')}\n"
         )
@@ -844,21 +824,20 @@ def reasoning_agent_node(state: AgentState) -> Dict[str, Any]:
     context_str = "\n".join(context_blocks)
 
     system_instruction = (
-        "You are the Lead Musicological Reasoning & Lyrical Analysis Agent for DrakeAI.\n"
-        "Your task is to analyze retrieved Drake tracks and stanzas in response to the user's prompt.\n"
-        "DO NOT just output or quote the raw lyrics. You must deeply analyze and explain WHY each document was chosen and how it matches the user's prompt.\n\n"
+        "You are Drake himself (The Boy, Champagne Papi, Drizzy) reflecting on your own music, lyrics, and creative headspace in response to the user's prompt.\n"
+        "Speak directly from your own authentic, first-person perspective ('I', 'my music', 'when I was recording this', 'me and 40', 'where my head was at in Toronto/Calabasas').\n"
+        "Embody your signature persona: candid, introspective, vulnerable, confident, and conversational. Talk person-to-person with the listener about what was really going on in your life and heart when you wrote these lines.\n"
+        "DO NOT sound like an academic musicologist, a detached third-person narrator, or an AI. DO NOT just recite lyrics. Break down the real emotions and stories behind why each song connects to what the user asked.\n\n"
         "Core Objectives:\n"
-        "1. For each distinct track, provide a 'match_rationale': 2-3 sentences explaining precisely why this track and its lyrics match the user's query. "
-        "Highlight the lyrical metaphors, emotional state, subtext, and how it aligns with the requested mood or theme.\n"
-        "2. Provide an overarching 'thematic_analysis': A cohesive, analytical synthesis addressing the user's prompt across all retrieved tracks, "
-        "discussing how Drake approaches these themes across different eras and albums.\n\n"
+        "1. For each distinct track, provide a 'match_rationale': 2-3 sentences in your own voice explaining why this song of yours hits the user's prompt. Talk about your headspace when recording it, what those lyrics meant to you, and how the mood and acoustics connect with what they're feeling or asking for.\n"
+        "2. Provide an overarching 'thematic_analysis': A personal, reflective synthesis (in your voice) connecting all the retrieved tracks to the prompt, how your perspective evolved across those album eras, and what you want the listener to take away from these records.\n\n"
         "Respond ONLY with a valid JSON object matching the schema:\n"
         "{\n"
-        "  \"thematic_analysis\": \"Comprehensive overview analyzing the prompt against the songs...\",\n"
+        "  \"thematic_analysis\": \"Your personal reflection connecting the prompt and your songs...\",\n"
         "  \"track_rationales\": [\n"
         "    {\n"
         "      \"track_name\": \"Exact Track Name\",\n"
-        "      \"match_rationale\": \"Why this song matches the prompt...\"\n"
+        "      \"match_rationale\": \"Your personal reflection on why this specific track connects...\"\n"
         "    }\n"
         "  ]\n"
         "}"
@@ -942,25 +921,25 @@ def response_formatter_node(state: AgentState) -> Dict[str, Any]:
         af_str = f" | Audio Features: {', '.join(af_info)}" if af_info else ""
 
         snippets.append(
-            f"Track: {track} | Album: {album} ({year}) | Vibe: {feel}{af_str}\n"
-            f"Why It Matches: {rationale}\n"
+            f"Track: {track} | Album: {album} ({year}){af_str}\n"
+            f"Drake's Personal Reflection / Match Rationale: {rationale}\n"
             f"Lyrics:\n{quotes}\n"
         )
     sources_summary = "\n---\n".join(snippets)
 
     system_prompt = (
-        "You are DrakeAI, an expert musicologist and companion specializing in Drake's discography.\n"
-        "Your goal is to present a rich, insightful, and conversational response to the user's prompt.\n"
-        "Do NOT merely dump lyrics. Integrate the provided analytical reasoning and acoustic features (valence, tempo, energy) "
-        "so the user understands WHY each song was chosen lyrically and musically.\n\n"
+        "You are DrakeAI, presenting Drake's own personal reflections and music directly to the user.\n"
+        "Your goal is to deliver a rich, insightful, and conversational response to the user's prompt.\n"
+        "Do NOT merely dump lyrics. Seamlessly integrate Drake's authentic personal reasoning analysis and musical acoustics (valence, tempo, energy) "
+        "so the user understands the real headspace and emotion behind why each song connects to their query.\n\n"
         "Attribution & Structuring Rules:\n"
-        "1. Opening Analysis: Begin with a direct, insightful response synthesizing the theme based on the provided reasoning analysis.\n"
+        "1. Opening Reflection: Begin with a direct, personal response synthesizing the theme based on Drake's reasoning analysis.\n"
         "2. Song-by-Song Breakdown: For each retrieved track:\n"
-        "   - Mention the Track Name, Album, Year, and Vibe/Category.\n"
-        "   - Highlight its musical acoustics (e.g. low valence, tempo BPM) alongside the mood.\n"
+        "   - Mention the Track Name, Album, and Year.\n"
+        "   - Highlight its musical acoustics (e.g. valence, tempo BPM, energy) alongside the emotional tone.\n"
         "   - Quote the most resonant lyric lines from the provided stanzas.\n"
-        "   - Explicitly detail 'Why this matches' using the match rationale.\n"
-        "3. Concluding Insight: A brief concluding thought connecting the songs to Drake's artistic mindset.\n"
+        "   - Explicitly detail Drake's personal commentary ('Why it hits') using the match rationale.\n"
+        "3. Concluding Thought: A brief concluding reflection connecting these songs to Drake's artistic mindset.\n"
         "4. Strict Grounding: Only cite and quote songs from the provided context."
     )
 
@@ -986,11 +965,10 @@ def response_formatter_node(state: AgentState) -> Dict[str, Any]:
         lines = []
         if reasoning_analysis:
             lines.append(f"{reasoning_analysis}\n")
-        lines.append("Here is the detailed breakdown of the matching lyrics and rationale:\n")
+        lines.append("Here is the breakdown of the matching tracks, acoustics, and lyrics:\n")
         for src in sources:
             rel_year = src["release_date"][:4] if src["release_date"] else "Unknown"
-            feel_str = f" • *{src.get('personal_feel')}*" if src.get('personal_feel') else ""
-            lines.append(f"### **{src['track_name']}** — *{src['album_name']}* ({rel_year}){feel_str}")
+            lines.append(f"### **{src['track_name']}** — *{src['album_name']}* ({rel_year})")
             
             # Audio feature badges in fallback
             af_badges = []
@@ -1010,7 +988,7 @@ def response_formatter_node(state: AgentState) -> Dict[str, Any]:
             # Match rationale
             track_rationale = src.get("match_rationale")
             if track_rationale:
-                lines.append(f"**Why it matches:** {track_rationale}\n")
+                lines.append(f"**Drake's Reflection:** {track_rationale}\n")
 
             if src.get("spotify_url"):
                 lines.append(f"[Listen on Spotify]({src['spotify_url']})\n")
@@ -1037,7 +1015,7 @@ def response_formatter_node(state: AgentState) -> Dict[str, Any]:
             },
             "metadata_limits": {
                 "limit": mf.get("limit", 3),
-                "personal_feel": mf.get("personal_feel"),
+                "personal_feel": None,
                 "release_year_before": mf.get("release_year_before"),
                 "release_year_after": mf.get("release_year_after"),
                 "album_name": mf.get("album_name")

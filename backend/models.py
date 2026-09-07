@@ -3,7 +3,8 @@
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
-# Supported 10 subjective categorization categories from data_flow.md
+# [DEPRECATED] Former static 10 subjective categorization categories.
+# Dynamic semantic query expansion and acoustic profiling now govern mood and vibe extraction.
 SUPPORTED_PERSONAL_FEELS = [
     "Late-Night Confessional",
     "Triumphant Flex",
@@ -57,7 +58,7 @@ class AudioFeatureTargets(BaseModel):
 class MetadataFilters(BaseModel):
     personal_feel: Optional[str] = Field(
         default=None,
-        description="One of the 10 supported personal feel categories if applicable to the user prompt."
+        description="[DEPRECATED] Former static vibe category. Kept optional for backward compatibility."
     )
     release_year_before: Optional[int] = Field(
         default=None,
@@ -139,14 +140,14 @@ class SourceItem(BaseModel):
     album_art_url: Optional[str] = None
     spotify_url: Optional[str] = None
     quoted_stanzas: List[str] = Field(default_factory=list)
-    personal_feel: Optional[str] = None
+    personal_feel: Optional[str] = Field(default=None, description="[DEPRECATED] Former static vibe category.")
     track_lyrics: Optional[str] = Field(
         default=None,
         description="Full lyrics of the parent track pulled into context."
     )
     match_rationale: Optional[str] = Field(
         default=None,
-        description="Analytical reasoning explaining why this specific track and stanza match the user's prompt."
+        description="Drake's personal reflection explaining why this track and stanza match the user's prompt."
     )
     # Audio feature attributes
     valence: Optional[float] = Field(default=None, description="Musical positiveness (0.0 to 1.0)")
@@ -164,17 +165,17 @@ class SourceItem(BaseModel):
 class TrackMatchAnalysis(BaseModel):
     track_name: str
     match_rationale: str = Field(
-        description="Analysis of why this track's lyrics and mood directly match the user's query."
+        description="Drake's personal reflection on why this track's lyrics and mood directly match the user's query."
     )
 
 
 class ReasoningAgentOutput(BaseModel):
     thematic_analysis: str = Field(
-        description="Overarching thematic and lyrical analysis addressing the user's prompt across the retrieved tracks."
+        description="Drake's personal overarching thematic and lyrical breakdown addressing the user's prompt across the retrieved tracks."
     )
     track_rationales: List[TrackMatchAnalysis] = Field(
         default_factory=list,
-        description="Per-track match explanations linking exact lyrics/subtext to the user's query."
+        description="Drake's per-track match reflections linking his exact lyrics, subtext, and mindstate to the user's query."
     )
 
 

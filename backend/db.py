@@ -184,7 +184,7 @@ def _build_sql_params(
     return {
         "query_vector": query_vector,
         "excluded_track_ids": clean_excluded,
-        "personal_feel": filters.get("personal_feel"),
+        "personal_feel": None,  # [DEPRECATED] Vibe categories are no longer filtered; dynamic acoustics & semantics govern retrieval
         "release_year_before": filters.get("release_year_before"),
         "release_year_after": filters.get("release_year_after"),
         "album_name": filters.get("album_name"),

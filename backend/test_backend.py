@@ -124,7 +124,7 @@ class TestDrakeAIBackend(unittest.TestCase):
         self.assertGreater(len(first_src["match_rationale"]), 10)
 
     def test_07_heuristic_reasoning(self):
-        """Verify heuristic reasoning generates analytical thematic analysis and match rationales."""
+        """Verify heuristic reasoning generates candid thematic analysis and match rationales in Drake's persona."""
         from backend.graph.nodes import _heuristic_reasoning
         mock_context = [
             {
@@ -132,7 +132,6 @@ class TestDrakeAIBackend(unittest.TestCase):
                 "track_name": "Passionfruit",
                 "album_name": "More Life",
                 "release_date": "2017-03-18",
-                "personal_feel": "Late-Night Confessional",
                 "lyric_chunk": "Listen, seeing you got, seeing you got me started"
             }
         ]
@@ -141,7 +140,9 @@ class TestDrakeAIBackend(unittest.TestCase):
         self.assertIn("document_rationales", result)
         self.assertIn("Passionfruit", result["document_rationales"])
         self.assertIn("More Life", result["document_rationales"]["Passionfruit"])
-        self.assertIn("Late-Night Confessional", result["document_rationales"]["Passionfruit"])
+        # Verify Drake first-person voice
+        self.assertTrue(any(w in result["document_rationales"]["Passionfruit"].lower() for w in ["i", "me", "honest", "feelings"]))
+        self.assertTrue(any(w in result["thematic_analysis"].lower() for w in ["i", "my", "records", "toronto"]))
 
     def test_08_reasoning_node_empty_context(self):
         """Verify reasoning agent handles empty retrieval gracefully."""
@@ -177,8 +178,9 @@ class TestDrakeAIBackend(unittest.TestCase):
                     "track_id": "t_marvins",
                     "track_name": "Marvins Room",
                     "album_name": "Take Care",
-                    "personal_feel": "Late-Night Confessional",
                     "similarity": 0.82,
+                    "valence": 0.28,
+                    "energy": 0.32,
                     "lyric_chunk": "Cups of the Rosé, bitches in my old phone",
                     "track_lyrics": "Cups of the Rosé, bitches in my old phone\nI should call her and tell her that I miss her..."
                 }
@@ -202,8 +204,9 @@ class TestDrakeAIBackend(unittest.TestCase):
                     "track_id": "t_club",
                     "track_name": "Jumpman",
                     "album_name": "What a Time to Be Alive",
-                    "personal_feel": "The Club Anthem",
                     "similarity": 0.35,
+                    "valence": 0.85,
+                    "energy": 0.88,
                     "lyric_chunk": "Jumpman, Jumpman, Jumpman, them boys up to somethin'",
                     "track_lyrics": "Jumpman, Jumpman, Jumpman, them boys up to somethin'\nWoo, just spent the night in the club..."
                 }
@@ -541,5 +544,52 @@ class TestDrakeAIBackend(unittest.TestCase):
         steps = [e.get("step") for e in events]
         self.assertIn("query_analysis", steps)
         self.assertIn("complete", steps)
+
+    def test_24_drake_persona_and_vibe_deprecation(self):
+        """Verify Drake persona tone and deprecation of vibe categories across reasoning and formatter."""
+        from backend.graph.nodes import _heuristic_guardrail_and_intent, _heuristic_reasoning, response_formatter_node
+        # 1. Guardrail does not set personal_feel
+        intent = _heuristic_guardrail_and_intent("Find late-night confessional songs")
+        self.assertIsNone(intent.metadata_filters.personal_feel)
+
+        # 2. Reasoning outputs Drake first-person reflection
+        mock_ctx = [
+            {
+                "track_id": "tr_marvins",
+                "track_name": "Marvins Room",
+                "album_name": "Take Care",
+                "release_date": "2011-11-15",
+                "lyric_chunk": "I'm just sayin' you could do better",
+                "valence": 0.28,
+                "tempo": 86.0
+            }
+        ]
+        reasoning = _heuristic_reasoning("late night thoughts", mock_ctx)
+        drake_rationale = reasoning["document_rationales"]["Marvins Room"]
+        # Confirm authentic first-person Drake phrasing
+        self.assertTrue(any(phrase in drake_rationale.lower() for phrase in ["honest moment for me", "my real feelings", "man, 'marvins room'"]))
+        self.assertNotIn("under the '", drake_rationale)
+        self.assertNotIn("category", drake_rationale.lower())
+
+        # 3. Response formatter produces Drake's reflection without vibe badges
+        state = {
+            "prompt": "late night thoughts",
+            "extracted_keywords": ["late night"],
+            "semantic_query": "late night thoughts",
+            "metadata_filters": {"limit": 1},
+            "retrieved_context": mock_ctx,
+            "pulled_tracks": [],
+            "is_vetted": True,
+            "retry_count": 0,
+            "vetting_rationale": "Vetted",
+            "vetting_decisions": [],
+            "reasoning_analysis": reasoning["thematic_analysis"],
+            "document_rationales": reasoning["document_rationales"]
+        }
+        res = response_formatter_node(state)
+        final_resp = res["final_response"]
+        self.assertIn("Drake's Reflection", final_resp)
+        self.assertNotIn("Vibe / Category", final_resp)
+        self.assertIsNone(res["agent_trace"]["query_analysis"]["metadata_limits"]["personal_feel"])
 
 
