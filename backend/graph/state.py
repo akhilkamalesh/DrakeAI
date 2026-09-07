@@ -20,3 +20,7 @@ class AgentState(TypedDict):
     document_rationales: Dict[str, str]
     final_response: str
     sources: List[Dict[str, Any]]
+    extracted_keywords: Optional[List[str]]
+    pulled_tracks: Optional[List[Dict[str, Any]]]
+    vetting_decisions: Optional[List[Dict[str, Any]]]
+    agent_trace: Optional[Dict[str, Any]]

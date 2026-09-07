@@ -72,6 +72,44 @@ COMMENT ON COLUMN audio_feature.tempo IS 'The overall estimated tempo of a track
 COMMENT ON COLUMN audio_feature.time_signature IS 'An estimated time signature, specifying how many beats are in each bar';
 COMMENT ON COLUMN audio_feature.valence IS 'A measure from 0.0 to 1.0 describing the musical positiveness conveyed by a track';
 
+-- Create track_audio_feature table
+CREATE TABLE IF NOT EXISTS track_audio_feature (
+    track_id VARCHAR(255) PRIMARY KEY REFERENCES track(id) ON DELETE CASCADE,
+    danceability REAL NOT NULL,
+    energy REAL NOT NULL,
+    "key" INTEGER NOT NULL,
+    loudness REAL NOT NULL,
+    "mode" INTEGER NOT NULL,
+    speechiness REAL NOT NULL,
+    acousticness REAL NOT NULL,
+    instrumentalness REAL NOT NULL,
+    liveness REAL NOT NULL,
+    valence REAL NOT NULL,
+    tempo REAL NOT NULL,
+    type VARCHAR(50) DEFAULT 'audio_features',
+    duration_ms INTEGER,
+    time_signature INTEGER DEFAULT 4
+);
+
+COMMENT ON TABLE track_audio_feature IS 'Represents Spotify-standard audio features generated for Drake songs';
+COMMENT ON COLUMN track_audio_feature.track_id IS 'Foreign key referencing the track table (track.id)';
+COMMENT ON COLUMN track_audio_feature.danceability IS 'Danceability describes how suitable a track is for dancing (0.0 to 1.0)';
+COMMENT ON COLUMN track_audio_feature.energy IS 'Perceptual measure of intensity and activity (0.0 to 1.0)';
+COMMENT ON COLUMN track_audio_feature.key IS 'Key the track is in using standard Pitch Class notation (0 = C, 1 = C#, ..., 11 = B)';
+COMMENT ON COLUMN track_audio_feature.loudness IS 'Overall loudness of a track in decibels (dB)';
+COMMENT ON COLUMN track_audio_feature.mode IS 'Modality of a track (1 = major, 0 = minor)';
+COMMENT ON COLUMN track_audio_feature.speechiness IS 'Presence of spoken words in a track (0.0 to 1.0)';
+COMMENT ON COLUMN track_audio_feature.acousticness IS 'Confidence measure of whether the track is acoustic (0.0 to 1.0)';
+COMMENT ON COLUMN track_audio_feature.instrumentalness IS 'Predicts whether a track contains no vocals (0.0 to 1.0)';
+COMMENT ON COLUMN track_audio_feature.liveness IS 'Detects audience presence in the recording (0.0 to 1.0)';
+COMMENT ON COLUMN track_audio_feature.valence IS 'Musical positiveness conveyed by a track (0.0 to 1.0)';
+COMMENT ON COLUMN track_audio_feature.tempo IS 'Overall estimated tempo of a track in beats per minute (BPM)';
+COMMENT ON COLUMN track_audio_feature.type IS 'Object type description (default: audio_features)';
+COMMENT ON COLUMN track_audio_feature.duration_ms IS 'Track duration in milliseconds';
+COMMENT ON COLUMN track_audio_feature.time_signature IS 'Estimated overall time signature (beats per bar)';
+
+CREATE INDEX IF NOT EXISTS idx_track_audio_feature_track_id ON track_audio_feature(track_id);
+
 -- Create stanza table
 CREATE TABLE IF NOT EXISTS stanza (
     id SERIAL PRIMARY KEY,

@@ -20,6 +20,8 @@ from backend.embeddings import get_embedder
 from backend.graph.state import AgentState
 from backend.models import (
     SUPPORTED_PERSONAL_FEELS,
+    AudioFeatureFilters,
+    AudioFeatureTargets,
     IntentOutput,
     MetadataFilters,
     ReasoningAgentOutput,
@@ -159,18 +161,82 @@ def _heuristic_guardrail_and_intent(prompt: str) -> IntentOutput:
             album_name = alb
             break
 
-    # Limit detection
+    # Limit detection: e.g. "top 3", "5 high energy club bangers", "3 tracks"
     limit = 3
-    limit_match = re.search(r"\b(\d+)\s*(?:lyrics|stanzas|songs|tracks|quotes)\b", prompt_lower)
+    limit_match = re.search(r"\b(?:top\s+)?(\d+)\s*(?:[a-z\s-]{0,25})?(?:lyrics|stanzas|songs|tracks|quotes|bangers|hits)\b", prompt_lower)
+    if not limit_match:
+        limit_match = re.search(r"\b(?:top|give me|show me|find)\s*(\d+)\b", prompt_lower)
     if limit_match:
         limit = max(1, min(int(limit_match.group(1)), 10))
+
+    # Audio feature extraction heuristics
+    af_filters = None
+    af_targets = None
+    sort_by = None
+
+    sad_words = ["sad", "saddest", "heartbreak", "heartbroken", "crying", "cry", "tears", "gutwrenching", "depression", "depressed", "sorrow", "painful"]
+    hype_words = ["hype", "banger", "bangers", "turn up", "high energy", "club anthem", "party"]
+    dance_words = ["dance", "dancing", "danceable", "groove", "island", "dancehall"]
+    slow_words = ["slow", "slowest", "ballad", "slow tempo", "low bpm"]
+    fast_words = ["fast", "fastest", "upbeat", "high tempo", "high bpm"]
+    acoustic_words = ["acoustic", "piano", "guitar", "stripped down"]
+    aggressive_words = ["aggressive", "mob tie", "mob ties", "drill", "trap", "hardest"]
+
+    if any(w in prompt_lower for w in sad_words):
+        af_filters = AudioFeatureFilters(max_valence=0.40, max_energy=0.55)
+        af_targets = AudioFeatureTargets(target_valence=0.20, target_energy=0.35, target_tempo=80.0)
+        if "saddest" in prompt_lower or "most sad" in prompt_lower:
+            sort_by = "valence_asc"
+    elif any(w in prompt_lower for w in hype_words):
+        af_filters = AudioFeatureFilters(min_energy=0.65, min_danceability=0.60)
+        af_targets = AudioFeatureTargets(target_energy=0.80, target_danceability=0.80, target_valence=0.65)
+        sort_by = "energy_desc"
+    elif any(w in prompt_lower for w in dance_words):
+        af_filters = AudioFeatureFilters(min_danceability=0.70)
+        af_targets = AudioFeatureTargets(target_danceability=0.85, target_valence=0.65)
+    elif any(w in prompt_lower for w in slow_words):
+        af_filters = AudioFeatureFilters(max_tempo=95.0, max_energy=0.55)
+        af_targets = AudioFeatureTargets(target_tempo=75.0, target_energy=0.35)
+        if "slowest" in prompt_lower:
+            sort_by = "tempo_asc"
+    elif any(w in prompt_lower for w in fast_words):
+        af_filters = AudioFeatureFilters(min_tempo=110.0, min_energy=0.65)
+        af_targets = AudioFeatureTargets(target_tempo=125.0, target_energy=0.75)
+    elif any(w in prompt_lower for w in acoustic_words):
+        af_filters = AudioFeatureFilters(min_acousticness=0.30)
+        af_targets = AudioFeatureTargets(target_acousticness=0.55, target_energy=0.40)
+    elif any(w in prompt_lower for w in aggressive_words):
+        af_filters = AudioFeatureFilters(min_energy=0.65, mode=0)
+        af_targets = AudioFeatureTargets(target_energy=0.80, target_speechiness=0.25)
+
+    # Numeric pattern overrides (e.g. "valence < 0.3", "energy > 0.8")
+    val_match = re.search(r"valence\s*(?:<|less than|under)\s*([0-1](?:\.\d+)?)", prompt_lower)
+    if val_match:
+        if af_filters is None:
+            af_filters = AudioFeatureFilters()
+        af_filters.max_valence = float(val_match.group(1))
+
+    energy_match = re.search(r"energy\s*(?:>|greater than|over)\s*([0-1](?:\.\d+)?)", prompt_lower)
+    if energy_match:
+        if af_filters is None:
+            af_filters = AudioFeatureFilters()
+        af_filters.min_energy = float(energy_match.group(1))
+
+    tempo_match = re.search(r"tempo\s*(?:>|greater than|over)\s*(\d+)", prompt_lower)
+    if tempo_match:
+        if af_filters is None:
+            af_filters = AudioFeatureFilters()
+        af_filters.min_tempo = float(tempo_match.group(1))
 
     filters = MetadataFilters(
         personal_feel=detected_feel,
         release_year_before=year_before,
         release_year_after=year_after,
         album_name=album_name,
-        limit=limit
+        limit=limit,
+        audio_filters=af_filters,
+        audio_targets=af_targets,
+        sort_by=sort_by
     )
 
     # Concept expansion for semantic similarity
@@ -192,39 +258,83 @@ def _heuristic_guardrail_and_intent(prompt: str) -> IntentOutput:
     )
 
 
+def _extract_query_keywords(prompt: str) -> List[str]:
+    """Extracts salient keywords and semantic concepts from user query for visual breakdown."""
+    prompt_lower = prompt.lower()
+    keywords = []
+
+    # 1. Check known categories / vibes
+    for cat in SUPPORTED_PERSONAL_FEELS:
+        if any(w.lower() in prompt_lower for w in cat.split() if len(w) > 3):
+            if cat not in keywords:
+                keywords.append(cat)
+
+    # 2. Check albums
+    for alb in KNOWN_ALBUMS:
+        if alb.lower() in prompt_lower:
+            if f"Album: {alb}" not in keywords:
+                keywords.append(f"Album: {alb}")
+
+    # 3. Emotional / vibe descriptor words
+    theme_words = [
+        "saddest", "sad", "heartbreak", "heartbroken", "crying", "tears", "gutwrenching",
+        "introspective", "late night", "confessional", "flex", "triumphant", "banger", "hype",
+        "club anthem", "mob tie", "aggressive", "toxic", "petty", "loyalty", "brotherhood",
+        "paranoid", "guarded", "slow tempo", "fast tempo", "high energy", "acoustic", "danceable"
+    ]
+    for w in theme_words:
+        if w in prompt_lower and w not in keywords:
+            keywords.append(w)
+
+    # 4. Fallback if few keywords found: tokenize words with length > 3 excluding common stop words
+    stopwords = {
+        "what", "where", "when", "which", "show", "give", "find", "tell", "drake", "drakes",
+        "song", "songs", "track", "tracks", "lyric", "lyrics", "about", "with", "from", "that",
+        "this", "have", "some", "most", "best", "more", "into", "over", "under", "like"
+    }
+    tokens = re.findall(r"\b[a-zA-Z]{4,}\b", prompt_lower)
+    for tok in tokens:
+        if tok not in stopwords and tok not in keywords:
+            keywords.append(tok)
+
+    return keywords[:6]
+
+
 def guardrail_intent_node(state: AgentState) -> Dict[str, Any]:
     """
     Node 1: Evaluates whether the user's query is in-scope and extracts structured
-    semantic query themes and metadata filters using LLM Call #1.
-    Performs comprehensive semantic query expansion (synonyms, definitions, examples).
+    semantic query themes, audio feature filters, and metadata filters using LLM Call #1.
+    Performs comprehensive semantic query expansion and acoustic profiling.
     """
     prompt = state["prompt"]
     history = state.get("history", [])
 
     system_instruction = (
         "You are the Guardrail & Intent Extractor for DrakeAI, a RAG agent specialized "
-        "exclusively in Drake's discography, studio albums, tracks, lyrics, and vibes.\n\n"
+        "exclusively in Drake's discography, studio albums, tracks, lyrics, vibes, and Spotify audio features.\n\n"
         "Instructions:\n"
-        "1. Check if the user query relates to Drake's songs, albums, lyrics, mood, or music career.\n"
+        "1. Check if the user query relates to Drake's songs, albums, lyrics, mood, music style, or acoustics.\n"
         "   - If completely unrelated, set is_relevant: false and rejection_message to:\n"
         f"     \"{OUT_OF_SCOPE_GUIDANCE}\"\n"
         "   - If relevant (or greetings/questions about Drake's catalog), set is_relevant: true.\n"
         "2. If relevant, extract:\n"
         "   - semantic_query: Deeply expanded, rich semantic search statement engineered to maximize cosine similarity against vector embeddings.\n"
-        "     CRITICAL EXPANSION REQUIREMENT:\n"
-        "     DO NOT merely repeat the user's brief prompt. Extract the core emotional state, subject matter, and vibe, and EXPAND it thoroughly to include:\n"
-        "     * Synonyms & Related Vocabulary (e.g. for 'gutwrenching' -> heartbreaking, devastating, agonizing, soul-crushing, painful, sorrowful, despairing, mourning)\n"
-        "     * Psychological Definitions & Core Meaning (e.g. profound emotional torment, unbearable grief from romantic loss or betrayal, weeping)\n"
-        "     * Concrete Lyrical Manifestations & Examples (e.g. crying alone late at night, staring at an unanswered text, pouring drinks, Marvins Room vibe, cold empty bed, emotional numbness)\n"
-        "     * Drake-specific motifs & stylistic tropes (e.g. late-night Toronto confessions, vulnerable regret, missing an ex, sorrow despite success)\n"
-        "     Combine these into a coherent, highly descriptive semantic search string.\n"
+        "     DO NOT merely repeat the prompt. Expand core emotions, synonyms, definitions, and lyrical examples.\n"
         "   - metadata_filters:\n"
         f"     - personal_feel: null or EXACTLY ONE of: {json.dumps(SUPPORTED_PERSONAL_FEELS)}\n"
-        "     - release_year_before: null or integer (e.g. 2018 for 'before 2018')\n"
-        "     - release_year_after: null or integer (e.g. 2015 for 'after 2015')\n"
-        "     - album_name: null or album string (e.g. 'Take Care', 'Scorpion')\n"
+        "     - release_year_before: null or integer\n"
+        "     - release_year_after: null or integer\n"
+        "     - album_name: null or album string\n"
         "     - album_type: null or 'album'/'single'\n"
-        "     - limit: integer between 1 and 5 (default 5)\n\n"
+        "     - limit: integer between 1 and 10 (default 3)\n"
+        "     - audio_filters: null or object with optional hard constraints:\n"
+        "         {\"min_valence\": null, \"max_valence\": null, \"min_energy\": null, \"max_energy\": null,\n"
+        "          \"min_danceability\": null, \"max_danceability\": null, \"min_tempo\": null, \"max_tempo\": null,\n"
+        "          \"min_acousticness\": null, \"max_acousticness\": null, \"mode\": null}\n"
+        "     - audio_targets: null or object with soft target values for hybrid ranking:\n"
+        "         {\"target_valence\": null, \"target_energy\": null, \"target_danceability\": null,\n"
+        "          \"target_tempo\": null, \"target_acousticness\": null, \"target_speechiness\": null}\n"
+        "     - sort_by: null or 'valence_asc' (for saddest), 'valence_desc' (for happiest), 'energy_desc' (for hype), 'tempo_asc' (for slow)\n\n"
         "You MUST respond ONLY with a valid JSON object matching the schema."
     )
 
@@ -245,11 +355,14 @@ def guardrail_intent_node(state: AgentState) -> Dict[str, Any]:
         logger.warning("Gemini Guardrail parsing failed or timed out: %s. Using heuristic fallback.", e)
         intent_result = _heuristic_guardrail_and_intent(prompt)
 
+    keywords = _extract_query_keywords(prompt)
+
     return {
         "is_relevant": intent_result.is_relevant,
         "rejection_message": intent_result.rejection_message,
         "semantic_query": intent_result.semantic_query or prompt,
-        "metadata_filters": intent_result.metadata_filters.model_dump()
+        "metadata_filters": intent_result.metadata_filters.model_dump(),
+        "extracted_keywords": keywords
     }
 
 
@@ -273,9 +386,30 @@ def hybrid_retrieval_node(state: AgentState) -> Dict[str, Any]:
         excluded_track_ids=excluded_track_ids
     )
 
+    pulled_tracks = []
+    seen = set()
+    for row in retrieved_context:
+        tname = row.get("track_name", "Unknown Track")
+        if tname not in seen:
+            seen.add(tname)
+            pulled_tracks.append({
+                "track_name": tname,
+                "album_name": row.get("album_name", "Unknown Album"),
+                "release_date": str(row.get("release_date"))[:4] if row.get("release_date") else None,
+                "personal_feel": row.get("personal_feel"),
+                "similarity": round(float(row.get("similarity") or 0.0), 3),
+                "hybrid_score": round(float(row.get("hybrid_score") or 0.0), 3) if row.get("hybrid_score") is not None else None,
+                "valence": row.get("valence"),
+                "energy": row.get("energy"),
+                "tempo": row.get("tempo"),
+                "danceability": row.get("danceability"),
+                "lyric_snippet": (row.get("lyric_chunk") or "").strip()[:140]
+            })
+
     return {
         "query_vector": query_vector,
-        "retrieved_context": retrieved_context
+        "retrieved_context": retrieved_context,
+        "pulled_tracks": pulled_tracks
     }
 
 
@@ -286,21 +420,27 @@ def _heuristic_vet_track(
 ) -> TrackVettingResult:
     """
     Deterministic fallback verifier when LLM is unavailable or offline.
-    Examines similarity score, vibe consistency, and keyword presence across the full parent track.
+    Examines similarity score, vibe consistency, audio features, and keyword presence.
     """
     prompt_lower = (prompt + " " + (semantic_query or "")).lower()
     feel = (candidate.get("personal_feel") or "").lower()
     lyrics = (candidate.get("track_lyrics") or candidate.get("lyric_chunk") or "").lower()
     sim = float(candidate.get("similarity") or 0.0)
+    val = candidate.get("valence")
 
-    # Contradiction check: user asks for heartbreak / gutwrenching, but track is purely club anthem / mob tie
+    # Contradiction check: user asks for heartbreak / gutwrenching, but track is upbeat or club anthem
     sad_keywords = ["gutwrenching", "heartbreak", "sad", "crying", "tears", "pain", "sorrow", "alone", "regret"]
     if any(k in prompt_lower for k in sad_keywords):
+        reasons = []
         if feel in ["the club anthem", "hard-hitting / mob tie"] and not any(k in lyrics for k in ["cry", "tears", "heartbreak", "alone", "hurt"]):
+            reasons.append(f"vibe is '{candidate.get('personal_feel')}'")
+        if val is not None and float(val) > 0.65 and not any(k in lyrics for k in ["cry", "tears", "heartbreak", "alone", "hurt"]):
+            reasons.append(f"high musical valence ({float(val):.2f})")
+        if reasons:
             return TrackVettingResult(
                 is_match=False,
-                confidence=0.75,
-                reason=f"Candidate track '{candidate.get('track_name')}' ({candidate.get('personal_feel')}) contradicts the requested emotional heartbreak theme."
+                confidence=0.80,
+                reason=f"Candidate track '{candidate.get('track_name')}' contradicts the requested emotional heartbreak theme ({', '.join(reasons)})."
             )
 
     return TrackVettingResult(
@@ -314,7 +454,7 @@ def vet_track_node(state: AgentState) -> Dict[str, Any]:
     """
     Parent-Child Vetting Node:
     Evaluates whether the retrieved candidate parent track (with full lyrics pulled into context)
-    genuinely matches the user's prompt and semantic intent.
+    genuinely matches the user's prompt, semantic intent, and audio features.
     If yes, the track is approved and graph continues.
     If no, the candidate is rejected, added to excluded_track_ids, and retrieval is retried.
     """
@@ -329,7 +469,8 @@ def vet_track_node(state: AgentState) -> Dict[str, Any]:
         return {
             "is_vetted": False,
             "retry_count": retry_count + 1,
-            "vetting_rationale": "No candidate tracks found."
+            "vetting_rationale": "No candidate tracks found.",
+            "vetting_decisions": list(state.get("vetting_decisions") or [])
         }
 
     # Group stanzas by track ID so we vet parent tracks
@@ -343,13 +484,13 @@ def vet_track_node(state: AgentState) -> Dict[str, Any]:
     system_instruction = (
         "You are the Track Vetting & Relevance Judge for DrakeAI, specialized in Drake's catalog.\n"
         "A child lyric stanza was matched via vector cosine similarity, and the FULL parent track (complete song lyrics) "
-        "has been pulled into the context window.\n\n"
+        "and audio features (valence, energy, tempo) have been pulled into the context window.\n\n"
         "Your role is to strictly verify whether the entire track genuinely matches the user's prompt, emotional intent, "
-        "and requested vibe, or if the child stanza was a false-positive or superficial keyword match.\n\n"
+        "and requested musical vibe/features, or if the child stanza was a false-positive or superficial keyword match.\n\n"
         "Evaluation Guidelines:\n"
-        "1. Compare the user query and expanded semantic intent against the candidate track's title, vibe, album, and full lyrics.\n"
-        "2. If the user asks for a specific theme (e.g. 'gutwrenching' heartbreak, or 'time-stamp introspection'), check whether "
-        "the track as an artistic whole embodies that theme. A song is NOT a match if the mood or subject matter directly contradicts the prompt.\n"
+        "1. Compare the user query and expanded semantic intent against the candidate track's title, vibe, album, audio features, and full lyrics.\n"
+        "2. If the user asks for a specific theme (e.g. 'gutwrenching' heartbreak, or high-energy hype), check whether "
+        "the track as an artistic whole and its musical acoustics embody that theme.\n"
         "3. Respond ONLY with a valid JSON object matching the schema:\n"
         "   {\n"
         "     \"is_match\": true or false,\n"
@@ -360,6 +501,7 @@ def vet_track_node(state: AgentState) -> Dict[str, Any]:
 
     approved_context: List[Dict[str, Any]] = []
     primary_rationale = ""
+    new_decisions: List[Dict[str, Any]] = []
 
     for tid, rows in tracks_map.items():
         cand = rows[0]
@@ -369,12 +511,21 @@ def vet_track_node(state: AgentState) -> Dict[str, Any]:
         full_lyrics = cand.get("track_lyrics") or cand.get("lyric_chunk") or ""
         child_stanzas = "\n---\n".join(r.get("lyric_chunk", "") for r in rows)
 
+        af_info = []
+        if cand.get("valence") is not None:
+            af_info.append(f"Valence: {cand['valence']}")
+        if cand.get("energy") is not None:
+            af_info.append(f"Energy: {cand['energy']}")
+        if cand.get("tempo") is not None:
+            af_info.append(f"Tempo: {cand['tempo']} BPM")
+        af_str = f"\nAudio Features: {', '.join(af_info)}" if af_info else ""
+
         eval_prompt = (
             f"User Prompt: {prompt}\n"
             f"Semantic Query / Expanded Themes: {semantic_query}\n\n"
             f"Candidate Track: {tname}\n"
             f"Album: {aname}\n"
-            f"Vibe / Category: {feel}\n"
+            f"Vibe / Category: {feel}{af_str}\n"
             f"Matched Stanza (Child Chunk):\n{child_stanzas}\n\n"
             f"Full Parent Track Lyrics:\n{full_lyrics[:4000]}"
         )
@@ -395,6 +546,22 @@ def vet_track_node(state: AgentState) -> Dict[str, Any]:
             logger.warning("Gemini track vetting failed or timed out: %s. Using heuristic vetting.", e)
             vetting_result = _heuristic_vet_track(prompt, semantic_query, cand)
 
+        decision = {
+            "track_name": tname,
+            "album_name": aname,
+            "status": "APPROVED" if vetting_result.is_match else "REJECTED",
+            "is_match": vetting_result.is_match,
+            "confidence": round(float(vetting_result.confidence), 2),
+            "reason": vetting_result.reason,
+            "personal_feel": feel,
+            "valence": cand.get("valence"),
+            "energy": cand.get("energy"),
+            "tempo": cand.get("tempo"),
+            "danceability": cand.get("danceability"),
+            "retry_attempt": retry_count
+        }
+        new_decisions.append(decision)
+
         if vetting_result.is_match:
             logger.info("Track '%s' APPROVED by vetting agent: %s", tname, vetting_result.reason)
             approved_context.extend(rows)
@@ -408,12 +575,15 @@ def vet_track_node(state: AgentState) -> Dict[str, Any]:
             if not primary_rationale:
                 primary_rationale = vetting_result.reason
 
+    all_decisions = list(state.get("vetting_decisions") or []) + new_decisions
+
     if approved_context:
         return {
             "is_vetted": True,
             "retrieved_context": approved_context,
             "excluded_track_ids": excluded,
-            "vetting_rationale": primary_rationale
+            "vetting_rationale": primary_rationale,
+            "vetting_decisions": all_decisions
         }
     else:
         return {
@@ -421,7 +591,8 @@ def vet_track_node(state: AgentState) -> Dict[str, Any]:
             "retrieved_context": [],
             "excluded_track_ids": excluded,
             "retry_count": retry_count + 1,
-            "vetting_rationale": primary_rationale
+            "vetting_rationale": primary_rationale,
+            "vetting_decisions": all_decisions
         }
 
 
@@ -497,7 +668,17 @@ def _extract_sources(
                 "personal_feel": row.get("personal_feel"),
                 "track_lyrics": row.get("track_lyrics"),
                 "match_rationale": rationale,
-                "quoted_stanzas": []
+                "quoted_stanzas": [],
+                "valence": row.get("valence"),
+                "energy": row.get("energy"),
+                "danceability": row.get("danceability"),
+                "tempo": row.get("tempo"),
+                "acousticness": row.get("acousticness"),
+                "speechiness": row.get("speechiness"),
+                "loudness": row.get("loudness"),
+                "mode": row.get("mode"),
+                "similarity": row.get("similarity"),
+                "hybrid_score": row.get("hybrid_score")
             }
 
         lyric = row.get("lyric_chunk")
@@ -637,11 +818,23 @@ def reasoning_agent_node(state: AgentState) -> Dict[str, Any]:
     # Format context blocks for reasoning agent
     context_blocks = []
     for idx, row in enumerate(retrieved_context, start=1):
+        af_summary = []
+        if row.get("valence") is not None:
+            af_summary.append(f"Valence: {row['valence']}")
+        if row.get("energy") is not None:
+            af_summary.append(f"Energy: {row['energy']}")
+        if row.get("tempo") is not None:
+            af_summary.append(f"Tempo: {row['tempo']} BPM")
+        if row.get("danceability") is not None:
+            af_summary.append(f"Danceability: {row['danceability']}")
+        af_text = f"Audio Features: {', '.join(af_summary)}\n" if af_summary else ""
+
         block = (
             f"[Document {idx}]\n"
             f"Track: {row.get('track_name')}\n"
             f"Album: {row.get('album_name')} ({row.get('release_date', 'Unknown')})\n"
             f"Vibe / Category: {row.get('personal_feel', 'N/A')}\n"
+            f"{af_text}"
             f"Matched Child Stanza:\n{row.get('lyric_chunk')}\n"
         )
         parent_lyrics = row.get("track_lyrics")
@@ -736,8 +929,20 @@ def response_formatter_node(state: AgentState) -> Dict[str, Any]:
         feel = src.get("personal_feel", "N/A")
         rationale = document_rationales.get(track, "")
         quotes = "\n".join(src.get("quoted_stanzas", []))
+
+        af_info = []
+        if src.get("valence") is not None:
+            af_info.append(f"Valence: {src['valence']}")
+        if src.get("energy") is not None:
+            af_info.append(f"Energy: {src['energy']}")
+        if src.get("tempo") is not None:
+            af_info.append(f"Tempo: {src['tempo']} BPM")
+        if src.get("danceability") is not None:
+            af_info.append(f"Danceability: {src['danceability']}")
+        af_str = f" | Audio Features: {', '.join(af_info)}" if af_info else ""
+
         snippets.append(
-            f"Track: {track} | Album: {album} ({year}) | Vibe: {feel}\n"
+            f"Track: {track} | Album: {album} ({year}) | Vibe: {feel}{af_str}\n"
             f"Why It Matches: {rationale}\n"
             f"Lyrics:\n{quotes}\n"
         )
@@ -746,11 +951,13 @@ def response_formatter_node(state: AgentState) -> Dict[str, Any]:
     system_prompt = (
         "You are DrakeAI, an expert musicologist and companion specializing in Drake's discography.\n"
         "Your goal is to present a rich, insightful, and conversational response to the user's prompt.\n"
-        "Do NOT merely dump lyrics. Integrate the provided analytical reasoning so the user understands WHY each song was chosen.\n\n"
+        "Do NOT merely dump lyrics. Integrate the provided analytical reasoning and acoustic features (valence, tempo, energy) "
+        "so the user understands WHY each song was chosen lyrically and musically.\n\n"
         "Attribution & Structuring Rules:\n"
         "1. Opening Analysis: Begin with a direct, insightful response synthesizing the theme based on the provided reasoning analysis.\n"
         "2. Song-by-Song Breakdown: For each retrieved track:\n"
         "   - Mention the Track Name, Album, Year, and Vibe/Category.\n"
+        "   - Highlight its musical acoustics (e.g. low valence, tempo BPM) alongside the mood.\n"
         "   - Quote the most resonant lyric lines from the provided stanzas.\n"
         "   - Explicitly detail 'Why this matches' using the match rationale.\n"
         "3. Concluding Insight: A brief concluding thought connecting the songs to Drake's artistic mindset.\n"
@@ -784,6 +991,18 @@ def response_formatter_node(state: AgentState) -> Dict[str, Any]:
             rel_year = src["release_date"][:4] if src["release_date"] else "Unknown"
             feel_str = f" • *{src.get('personal_feel')}*" if src.get('personal_feel') else ""
             lines.append(f"### **{src['track_name']}** — *{src['album_name']}* ({rel_year}){feel_str}")
+            
+            # Audio feature badges in fallback
+            af_badges = []
+            if src.get("valence") is not None:
+                af_badges.append(f"📉 Valence: {src['valence']}")
+            if src.get("energy") is not None:
+                af_badges.append(f"⚡ Energy: {src['energy']}")
+            if src.get("tempo") is not None:
+                af_badges.append(f"⏱️ {src['tempo']} BPM")
+            if af_badges:
+                lines.append(f"**Acoustics:** {' | '.join(af_badges)}\n")
+
             for chunk in src["quoted_stanzas"][:2]:
                 quoted = "\n".join(f"> {line}" for line in chunk.splitlines() if line.strip())
                 lines.append(f"\n{quoted}\n")
@@ -797,9 +1016,47 @@ def response_formatter_node(state: AgentState) -> Dict[str, Any]:
                 lines.append(f"[Listen on Spotify]({src['spotify_url']})\n")
         final_text = "\n".join(lines)
 
+    # Compile unified agent trace
+    mf = state.get("metadata_filters", {}) or {}
+    af_filters = mf.get("audio_filters") or {}
+    if hasattr(af_filters, "model_dump"):
+        af_filters = af_filters.model_dump(exclude_none=True)
+    af_targets = mf.get("audio_targets") or {}
+    if hasattr(af_targets, "model_dump"):
+        af_targets = af_targets.model_dump(exclude_none=True)
+
+    agent_trace = {
+        "query_analysis": {
+            "prompt": prompt,
+            "keywords": state.get("extracted_keywords", []),
+            "semantic_query": state.get("semantic_query") or prompt,
+            "audio_feature_creation": {
+                "filters": {k: v for k, v in af_filters.items() if v is not None} if isinstance(af_filters, dict) else {},
+                "targets": {k: v for k, v in af_targets.items() if v is not None} if isinstance(af_targets, dict) else {},
+                "sort_by": mf.get("sort_by")
+            },
+            "metadata_limits": {
+                "limit": mf.get("limit", 3),
+                "personal_feel": mf.get("personal_feel"),
+                "release_year_before": mf.get("release_year_before"),
+                "release_year_after": mf.get("release_year_after"),
+                "album_name": mf.get("album_name")
+            }
+        },
+        "pulled_songs": state.get("pulled_tracks", []),
+        "vetting_agent": {
+            "is_vetted": state.get("is_vetted", False),
+            "retry_count": state.get("retry_count", 0),
+            "primary_rationale": state.get("vetting_rationale"),
+            "decisions": state.get("vetting_decisions", [])
+        },
+        "thematic_analysis": reasoning_analysis
+    }
+
     return {
         "final_response": final_text,
-        "sources": sources
+        "sources": sources,
+        "agent_trace": agent_trace
     }
 
 
@@ -807,7 +1064,25 @@ def response_formatter_node(state: AgentState) -> Dict[str, Any]:
 def out_of_scope_node(state: AgentState) -> Dict[str, Any]:
     """Handles out-of-scope queries with domain guidance."""
     msg = state.get("rejection_message") or OUT_OF_SCOPE_GUIDANCE
+    agent_trace = {
+        "query_analysis": {
+            "prompt": state.get("prompt", ""),
+            "keywords": state.get("extracted_keywords", []),
+            "semantic_query": None,
+            "audio_feature_creation": {"filters": {}, "targets": {}, "sort_by": None},
+            "metadata_limits": {"limit": 0, "personal_feel": None, "release_year_before": None, "release_year_after": None, "album_name": None}
+        },
+        "pulled_songs": [],
+        "vetting_agent": {
+            "is_vetted": False,
+            "retry_count": 0,
+            "primary_rationale": "Query determined to be out of scope.",
+            "decisions": []
+        },
+        "thematic_analysis": "Out of scope query - no Drake discography retrieval performed."
+    }
     return {
         "final_response": msg,
-        "sources": []
+        "sources": [],
+        "agent_trace": agent_trace
     }

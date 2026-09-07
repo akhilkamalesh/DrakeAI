@@ -31,6 +31,7 @@ SCHEMA_PATH = os.path.join(DB_DIR, "schema.sql")
 ALBUMS_PATH = os.path.join(DATA_DIR, "albums.json")
 TRACKS_PATH = os.path.join(DATA_DIR, "tracks.json")
 STANZA_PATH = os.path.join(DATA_DIR, "stanza.json")
+AUDIO_FEATURES_PATH = os.path.join(DATA_DIR, "track_audio_features.json")
 
 # Load environment variables
 load_dotenv(ENV_PATH)
@@ -183,6 +184,70 @@ def seed_stanzas(conn, stanza_path: str = STANZA_PATH, batch_size: int = 500) ->
     return total
 
 
+def seed_track_audio_features(conn, audio_features_path: str = AUDIO_FEATURES_PATH) -> int:
+    """Seeds track audio features into the track_audio_feature table."""
+    if not os.path.exists(audio_features_path):
+        print(f"\n[Audio Features] File not found at {audio_features_path}. Skipping.")
+        return 0
+
+    with open(audio_features_path, "r", encoding="utf-8") as f:
+        features: List[Dict[str, Any]] = json.load(f)
+
+    if not features:
+        print("\n[Audio Features] No audio features to seed.")
+        return 0
+
+    print(f"\n[Audio Features] Inserting {len(features)} track audio features...")
+    records = []
+    for af in features:
+        records.append((
+            af["track_id"],
+            af["danceability"],
+            af["energy"],
+            af["key"],
+            af["loudness"],
+            af["mode"],
+            af["speechiness"],
+            af["acousticness"],
+            af["instrumentalness"],
+            af["liveness"],
+            af["valence"],
+            af["tempo"],
+            af.get("type", "audio_features"),
+            af.get("duration_ms"),
+            af.get("time_signature", 4)
+        ))
+
+    insert_sql = """
+        INSERT INTO track_audio_feature (
+            track_id, danceability, energy, "key", loudness, "mode",
+            speechiness, acousticness, instrumentalness, liveness,
+            valence, tempo, type, duration_ms, time_signature
+        )
+        VALUES %s
+        ON CONFLICT (track_id) DO UPDATE SET
+            danceability = EXCLUDED.danceability,
+            energy = EXCLUDED.energy,
+            "key" = EXCLUDED.key,
+            loudness = EXCLUDED.loudness,
+            "mode" = EXCLUDED.mode,
+            speechiness = EXCLUDED.speechiness,
+            acousticness = EXCLUDED.acousticness,
+            instrumentalness = EXCLUDED.instrumentalness,
+            liveness = EXCLUDED.liveness,
+            valence = EXCLUDED.valence,
+            tempo = EXCLUDED.tempo,
+            type = EXCLUDED.type,
+            duration_ms = EXCLUDED.duration_ms,
+            time_signature = EXCLUDED.time_signature;
+    """
+    with conn.cursor() as cur:
+        execute_values(cur, insert_sql, records, page_size=200)
+    conn.commit()
+    print(f"[Audio Features] Successfully seeded {len(records)} track audio features.")
+    return len(records)
+
+
 def verify_database(conn):
     """Performs integrity checks and runs a test vector similarity search."""
     print("\n=======================================================")
@@ -200,9 +265,13 @@ def verify_database(conn):
         cur.execute("SELECT count(*) FROM stanza;")
         stanza_count = cur.fetchone()[0]
 
-        print(f"Table 'album':  {album_count} rows")
-        print(f"Table 'track':  {track_count} rows")
-        print(f"Table 'stanza': {stanza_count} rows")
+        cur.execute("SELECT count(*) FROM track_audio_feature;")
+        audio_feat_count = cur.fetchone()[0]
+
+        print(f"Table 'album':               {album_count} rows")
+        print(f"Table 'track':               {track_count} rows")
+        print(f"Table 'stanza':              {stanza_count} rows")
+        print(f"Table 'track_audio_feature': {audio_feat_count} rows")
 
         # Test pgvector similarity search
         print("\nRunning test semantic query for 'Late-Night Confessional' stanzas...")
@@ -241,6 +310,7 @@ def parse_args():
     parser.add_argument("--db-url", type=str, default=DEFAULT_DB_URL, help="PostgreSQL connection string")
     parser.add_argument("--drop-tables", action="store_true", help="Drop existing tables before seeding")
     parser.add_argument("--skip-stanzas", action="store_true", help="Skip stanza table seeding")
+    parser.add_argument("--skip-audio-features", action="store_true", help="Skip track_audio_feature table seeding")
     return parser.parse_args()
 
 
@@ -256,7 +326,7 @@ def main():
         if args.drop_tables:
             print("[Warning] Dropping existing tables (CASCADE)...")
             with conn.cursor() as cur:
-                cur.execute("DROP TABLE IF EXISTS stanza, audio_feature, track, album CASCADE;")
+                cur.execute("DROP TABLE IF EXISTS stanza, track_audio_feature, audio_feature, track, album CASCADE;")
             conn.commit()
 
         # 1. Apply schema
@@ -269,11 +339,15 @@ def main():
         # 3. Seed tracks
         seed_tracks(conn)
 
-        # 4. Seed stanzas
+        # 4. Seed track audio features
+        if not args.skip_audio_features:
+            seed_track_audio_features(conn)
+
+        # 5. Seed stanzas
         if not args.skip_stanzas:
             seed_stanzas(conn)
 
-        # 5. Verification
+        # 6. Verification
         verify_database(conn)
         print(f"Total seeding time: {time.time() - t0:.2f}s")
 

@@ -16,8 +16,10 @@ This document specifies the end-to-end data flow, agent architecture, and data c
    - The backend encodes the semantic query string into a 1024-dimensional dense vector using the workspace embedder (`SentenceTransformer('all-MiniLM-L6-v2')` zero-padded to 1024 dimensions).
    - Executes a parameterized SQL query against PostgreSQL with `pgvector` (`<->` / `<=>`).
    - **4.1 Context Graph Retrieval:** The query performs a multi-table JOIN across `stanza`, `track`, and `album` to retrieve the complete context graph (stanza lyrics, sequential chunk index, personal feel, track metadata, album artwork, and Spotify URLs).
-5. **Response Generation & Attribution:** The retrieved context graph and conversation history are passed to the Response Formatting Agent, which synthesizes a natural response with explicit citations (track title, album, release year, and Spotify links).
-6. **Response Delivery:** The structured answer and metadata are returned to the Streamlit UI and appended to `st.session_state.messages`.
+5. **Vetting Agent:**
+   - System takes the entire track and determines whether this answers the users query
+6. **Response Generation & Attribution:** The retrieved context graph and conversation history are passed to the Response Formatting Agent, which synthesizes a natural response with explicit citations (track title, album, release year, and Spotify links).
+7. **Response Delivery:** The structured answer and metadata are returned to the Streamlit UI and appended to `st.session_state.messages`.
 
 ---
 
