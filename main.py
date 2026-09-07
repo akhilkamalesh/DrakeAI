@@ -536,6 +536,7 @@ if prompt:
             stage1_placeholder = st.empty()
             stage2_placeholder = st.empty()
             stage3_placeholder = st.empty()
+            stage4_placeholder = st.empty()
 
             try:
                 # Stream agent execution events from backend
@@ -568,6 +569,14 @@ if prompt:
                                 status_box.write("⚖️ **Stage 3 Complete:** Parent-child vetting evaluations complete")
                                 with stage3_placeholder.container():
                                     render_stage3_vetting_agent(event)
+
+                            elif step == "reasoning":
+                                status_box.write("💡 **Stage 4 Complete:** Musicological thematic analysis synthesized")
+                                thematic = event.get("thematic_analysis")
+                                if thematic:
+                                    with stage4_placeholder.container():
+                                        st.markdown('<div class="stage-title">💡 Stage 4: Musicological Thematic Analysis</div>', unsafe_allow_html=True)
+                                        st.markdown(f'<div style="font-size: 0.88rem; color: #d1d5db; font-style: italic;">{thematic}</div>', unsafe_allow_html=True)
 
                             elif step == "complete":
                                 answer = event.get("response", "No response generated.")
