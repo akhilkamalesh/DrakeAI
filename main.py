@@ -1,6 +1,7 @@
 import json
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 st.set_page_config(
     page_title="DrakeAI — Lyric & Audio Intelligence",
@@ -41,16 +42,42 @@ st.markdown("""
         white-space: pre-wrap;
         margin-top: 6px;
     }
-    .spotify-btn {
-        display: inline-block;
+    .stChatMessage img {
+        max-width: 180px;
+        max-height: 180px;
+        border-radius: 8px;
+        object-fit: cover;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+        margin-top: 8px;
+        margin-bottom: 8px;
+        display: block;
+    }
+    .stChatMessage a[href*="spotify.com"], .spotify-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
         background-color: #1DB954;
         color: white !important;
-        padding: 4px 12px;
+        padding: 5px 14px;
         border-radius: 20px;
         text-decoration: none;
-        font-size: 0.8rem;
-        font-weight: 600;
-        margin-top: 8px;
+        font-size: 0.82rem;
+        font-weight: 700;
+        margin-top: 6px;
+        margin-bottom: 10px;
+        box-shadow: 0 2px 8px rgba(29, 185, 84, 0.3);
+        transition: all 0.2s ease;
+    }
+    .stChatMessage a[href*="spotify.com"]:hover, .spotify-btn:hover {
+        background-color: #1ed760;
+        box-shadow: 0 4px 12px rgba(29, 185, 84, 0.5);
+        transform: translateY(-1px);
+    }
+    .response-anchor {
+        scroll-margin-top: 80px;
+        display: block;
+        height: 0;
+        width: 0;
     }
     .rationale-box {
         background-color: rgba(29, 185, 84, 0.08);
@@ -199,18 +226,12 @@ with st.sidebar:
         st.caption("Start backend with: `uvicorn backend.main:app --reload`")
 
     st.divider()
-    st.subheader("🎧 Vibe & Lyric Categories")
+    st.subheader("🦉 Drake Persona & Intelligence")
     st.markdown("""
-    - 🌙 **Late-Night Confessional**
-    - 🏆 **Triumphant Flex**
-    - 🛡️ **Paranoid & Guarded**
-    - ⏳ **Time-Stamp Introspection**
-    - 💔 **Toxic & Petty**
-    - 🌴 **Global Groove / Island Infusion**
-    - 📻 **Pop Crossover / Radio R&B**
-    - 💥 **Hard-Hitting / Mob Tie**
-    - 🤝 **Crew Loyalty & Brotherhood**
-    - 🪩 **The Club Anthem**
+    - 🎙️ **Authentic Voice**: Drake reflects on his own tracks, lyrics, and mindstate.
+    - 🔍 **Dynamic Semantic Router**: Intent expansion with deep emotional nuances.
+    - 🎛️ **Acoustic Profiling**: Valence, energy, BPM tempo, and danceability targets.
+    - ⚖️ **Parent-Child Vetting**: Context judge evaluates full parent song lyrics.
     """)
 
     st.divider()
@@ -219,8 +240,8 @@ with st.sidebar:
         "What are the top 3 saddest Drake songs?",
         "Show me high-energy club bangers.",
         "Show me introspective Drake lyrics from More Life.",
-        "Find late-night confessional songs with slow tempo.",
-        "What are Drake's hardest-hitting mob tie lyrics?",
+        "Find late-night songs with slow tempo.",
+        "What are Drake's most guarded, paranoid lyrics?",
     ]
     for p in example_prompts:
         if st.button(p, key=f"btn_{p[:15]}"):
@@ -286,9 +307,6 @@ def render_stage1_query_analysis(qa: dict):
     limit = meta.get("limit")
     if limit is not None:
         meta_chips.append(f'<span class="chip-meta">🔢 Limit: {limit} tracks</span>')
-    feel = meta.get("personal_feel")
-    if feel:
-        meta_chips.append(f'<span class="chip-meta">✨ Vibe: {feel}</span>')
     album = meta.get("album_name")
     if album:
         meta_chips.append(f'<span class="chip-meta">💿 Album: {album}</span>')
@@ -310,19 +328,35 @@ def render_stage1_query_analysis(qa: dict):
             st.caption(sq)
 
 
+def render_stage_sql_generation(sql_data: dict):
+    """Renders Stage 1.5: Dynamic Text-to-SQL Agent Query & Strategy."""
+    if not sql_data or not sql_data.get("query"):
+        return
+
+    st.markdown('<div class="stage-title">🛠️ Stage 2: Dynamic SQL Generation (Text-to-SQL Agent)</div>', unsafe_allow_html=True)
+    strategy = sql_data.get("strategy") or "Dynamic query generated based on user intent and metadata."
+    q_type = sql_data.get("query_type") or "hybrid_semantic"
+    query = sql_data.get("query", "")
+    params = sql_data.get("params", {})
+
+    st.markdown(f'<div class="subtext"><b>Intent Strategy:</b> {strategy} &nbsp;|&nbsp; <b>Query Type:</b> <code>{q_type}</code></div>', unsafe_allow_html=True)
+    st.code(query.strip(), language="sql")
+    if params:
+        st.caption(f"**Bound Parameters:** `{params}`")
+
+
 def render_stage2_pulled_songs(songs: list):
     """Renders Stage 2: Initial Candidates Pulled from Context Graph."""
     if not songs:
         return
 
-    st.markdown('<div class="stage-title">📥 Stage 2: Pulled Candidate Songs (Database Retrieval)</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="subtext">Retrieved <b>{len(songs)}</b> candidate tracks via pgvector cosine similarity + relational metadata JOIN before parent track vetting:</div>', unsafe_allow_html=True)
+    st.markdown('<div class="stage-title">📥 Stage 3: Pulled Candidate Songs (Database Retrieval)</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="subtext">Retrieved <b>{len(songs)}</b> candidate tracks via dynamic SQL context graph retrieval before parent track vetting:</div>', unsafe_allow_html=True)
 
     for idx, s in enumerate(songs, start=1):
         tname = s.get("track_name", "Unknown")
         aname = s.get("album_name", "Unknown")
         year = f" ({s['release_date']})" if s.get("release_date") else ""
-        feel = s.get("personal_feel")
         sim = s.get("similarity")
         hybrid = s.get("hybrid_score")
         snippet = s.get("lyric_snippet", "")
@@ -339,10 +373,9 @@ def render_stage2_pulled_songs(songs: list):
         if s.get("tempo") is not None:
             stat_pills.append(f'<span class="audio-badge">⏱️ {s["tempo"]} BPM</span>')
 
-        vibe_str = f" • *{feel}*" if feel else ""
         st.markdown(f"""
         <div class="candidate-card">
-            <b>#{idx} {tname}</b> — <i>{aname}</i>{year}{vibe_str}<br/>
+            <b>#{idx} {tname}</b> — <i>{aname}</i>{year}<br/>
             {"".join(stat_pills)}
             <div style="font-size: 0.82rem; font-style: italic; color: #d1d5db; margin-top: 4px;">
                 "{snippet}..."
@@ -356,7 +389,7 @@ def render_stage3_vetting_agent(vetting: dict):
     if not vetting:
         return
 
-    st.markdown('<div class="stage-title">⚖️ Stage 3: Parent-Child Vetting Agent (Evaluation Judge)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="stage-title">⚖️ Stage 4: Parent-Child Vetting Agent (Evaluation Judge)</div>', unsafe_allow_html=True)
     decisions = vetting.get("decisions", [])
     retries = vetting.get("retry_count", 0)
 
@@ -415,82 +448,27 @@ def render_agent_breakdown(trace: dict):
     render_stage1_query_analysis(trace.get("query_analysis", {}))
     st.divider()
 
-    # 2. Pulled Candidate Songs
+    # 2. Dynamic Text-to-SQL Generation
+    if trace.get("sql_generation"):
+        render_stage_sql_generation(trace.get("sql_generation", {}))
+        st.divider()
+
+    # 3. Pulled Candidate Songs
     render_stage2_pulled_songs(trace.get("pulled_songs", []))
     st.divider()
 
-    # 3. Parent-Child Vetting Agent
+    # 4. Parent-Child Vetting Agent
     render_stage3_vetting_agent(trace.get("vetting_agent", {}))
 
-    # 4. Musicological Synthesis Preview
+    # 5. Musicological Synthesis Preview
     thematic = trace.get("thematic_analysis")
     if thematic:
         st.divider()
-        st.markdown('<div class="stage-title">💡 Stage 4: Musicological Thematic Analysis</div>', unsafe_allow_html=True)
+        st.markdown('<div class="stage-title">🦉 Stage 5: Drake\'s Thematic Reflection</div>', unsafe_allow_html=True)
         st.markdown(f'<div style="font-size: 0.88rem; color: #d1d5db; font-style: italic;">{thematic}</div>', unsafe_allow_html=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
 
-
-# Helper to render sources
-def render_sources(sources):
-    if not sources:
-        return
-    st.markdown("#### 📚 Sources & Attribution")
-    for src in sources:
-        track_name = src.get("track_name", "Unknown Track")
-        album_name = src.get("album_name", "Unknown Album")
-        rel_date = src.get("release_date", "")
-        year_str = f" ({rel_date[:4]})" if rel_date else ""
-        art_url = src.get("album_art_url")
-        spotify_url = src.get("spotify_url")
-        stanzas = src.get("quoted_stanzas", [])
-        feel = src.get("personal_feel")
-        rationale = src.get("match_rationale")
-
-        cols = st.columns([1, 4])
-        with cols[0]:
-            if art_url:
-                st.image(art_url, use_container_width=True)
-            else:
-                st.markdown("💿")
-        with cols[1]:
-            feel_badge = f" • *{feel}*" if feel else ""
-            st.markdown(f"**{track_name}** — *{album_name}*{year_str}{feel_badge}")
-            
-            # Render audio feature badges
-            badges_html = []
-            if src.get("valence") is not None:
-                val = src["valence"]
-                val_label = "Melancholic" if val < 0.4 else ("Euphoric" if val > 0.65 else "Neutral")
-                badges_html.append(f'<span class="audio-badge">📉 Valence: {val} ({val_label})</span>')
-            if src.get("energy") is not None:
-                en = src["energy"]
-                en_label = "Subdued" if en < 0.45 else ("High-Energy" if en > 0.7 else "Mid")
-                badges_html.append(f'<span class="audio-badge">⚡ Energy: {en} ({en_label})</span>')
-            if src.get("tempo") is not None:
-                badges_html.append(f'<span class="audio-badge">⏱️ {src["tempo"]} BPM</span>')
-            if src.get("danceability") is not None:
-                badges_html.append(f'<span class="audio-badge">💃 Dance: {src["danceability"]}</span>')
-            if src.get("hybrid_score") is not None and src.get("hybrid_score") != src.get("similarity"):
-                badges_html.append(f'<span class="audio-badge">🎯 Hybrid: {int(src["hybrid_score"] * 100)}%</span>')
-
-            if badges_html:
-                st.markdown("".join(badges_html), unsafe_allow_html=True)
-
-            if rationale:
-                st.markdown(f"""
-                <div class="rationale-box">
-                    <strong>💡 Why this matches:</strong><br/>
-                    {rationale}
-                </div>
-                """, unsafe_allow_html=True)
-
-            if spotify_url:
-                st.markdown(f"[▶ Listen on Spotify]({spotify_url})")
-            for chunk in stanzas[:2]:
-                st.markdown(f"> *\"{chunk.strip()}\"*")
-        st.divider()
 
 
 # Display prior chat messages
@@ -501,16 +479,13 @@ for message in st.session_state.messages:
             with st.expander("🧠 Agent Thinking Breakdown (Query Analysis → Pulled Songs → Vetting)", expanded=False):
                 render_agent_breakdown(message["agent_trace"])
 
-        st.markdown(message["content"])
-        if message.get("sources"):
-            with st.expander("View Quoted Tracks & Artwork", expanded=False):
-                render_sources(message["sources"])
+        st.markdown(message["content"], unsafe_allow_html=True)
 
 # Check if an example prompt was clicked
 prefill_prompt = st.session_state.pop("selected_prompt", None)
 
 # User input
-prompt = st.chat_input("Ask about Drake lyrics, vibes, or albums...")
+prompt = st.chat_input("Ask about Drake lyrics, mood, themes, or albums...")
 if prefill_prompt and not prompt:
     prompt = prefill_prompt
 
@@ -534,6 +509,7 @@ if prompt:
         # Live thinking container
         with st.status("🧠 DrakeAI Agent Pipeline Thinking...", expanded=True) as status_box:
             stage1_placeholder = st.empty()
+            stagesql_placeholder = st.empty()
             stage2_placeholder = st.empty()
             stage3_placeholder = st.empty()
             stage4_placeholder = st.empty()
@@ -560,22 +536,27 @@ if prompt:
                                 with stage1_placeholder.container():
                                     render_stage1_query_analysis(event)
 
+                            elif step == "sql_generation":
+                                status_box.write("🛠️ **Stage 2 Complete:** Dynamic Text-to-SQL query synthesized")
+                                with stagesql_placeholder.container():
+                                    render_stage_sql_generation(event)
+
                             elif step == "pulled_songs":
-                                status_box.write("📥 **Stage 2 Complete:** Pulled candidate tracks from PostgreSQL context graph")
+                                status_box.write("📥 **Stage 3 Complete:** Pulled candidate tracks from PostgreSQL context graph")
                                 with stage2_placeholder.container():
                                     render_stage2_pulled_songs(event.get("pulled_songs", []))
 
                             elif step == "vetting_agent":
-                                status_box.write("⚖️ **Stage 3 Complete:** Parent-child vetting evaluations complete")
+                                status_box.write("⚖️ **Stage 4 Complete:** Parent-child vetting evaluations complete")
                                 with stage3_placeholder.container():
                                     render_stage3_vetting_agent(event)
 
                             elif step == "reasoning":
-                                status_box.write("💡 **Stage 4 Complete:** Musicological thematic analysis synthesized")
+                                status_box.write("🦉 **Stage 5 Complete:** Drake's thematic reflection synthesized")
                                 thematic = event.get("thematic_analysis")
                                 if thematic:
                                     with stage4_placeholder.container():
-                                        st.markdown('<div class="stage-title">💡 Stage 4: Musicological Thematic Analysis</div>', unsafe_allow_html=True)
+                                        st.markdown('<div class="stage-title">🦉 Stage 5: Drake\'s Thematic Reflection</div>', unsafe_allow_html=True)
                                         st.markdown(f'<div style="font-size: 0.88rem; color: #d1d5db; font-style: italic;">{thematic}</div>', unsafe_allow_html=True)
 
                             elif step == "complete":
@@ -591,7 +572,7 @@ if prompt:
 
                     # Collapse status upon completion
                     status_box.update(
-                        label="🧠 Agent Thinking Breakdown (Query Analysis → Pulled Songs → Vetting)",
+                        label="🧠 Agent Thinking Breakdown (Query Analysis → SQL Generation → Pulled Songs → Vetting)",
                         state="complete",
                         expanded=False
                     )
@@ -628,14 +609,41 @@ if prompt:
                 answer = f"Error connecting to backend: {e}"
                 sources = []
 
-        # Render synthesized answer
-        if answer:
-            st.markdown(answer)
+        # Unique anchor placed immediately at the start of the generated response
+        response_anchor_id = f"response-start-{len(st.session_state.messages)}"
+        st.markdown(f'<div id="{response_anchor_id}" class="response-anchor"></div>', unsafe_allow_html=True)
 
-        # Render sources & artwork
-        if sources:
-            with st.expander("View Quoted Tracks & Artwork", expanded=True):
-                render_sources(sources)
+        # Render synthesized answer with integrated artwork & Spotify links
+        if answer:
+            st.markdown(answer, unsafe_allow_html=True)
+
+        # Smoothly bring the view to the start of the response generated, not at the bottom
+        components.html(
+            f"""
+            <script>
+                (function() {{
+                    const targetId = "{response_anchor_id}";
+                    function scrollToResponseStart() {{
+                        try {{
+                            const doc = window.parent.document;
+                            const el = doc.getElementById(targetId);
+                            if (el) {{
+                                el.scrollIntoView({{ behavior: "smooth", block: "start" }});
+                            }}
+                        }} catch (e) {{
+                            console.error("Auto-scroll error:", e);
+                        }}
+                    }}
+                    // Staggered calls to ensure DOM updates and status container collapse have finished
+                    setTimeout(scrollToResponseStart, 50);
+                    setTimeout(scrollToResponseStart, 250);
+                    setTimeout(scrollToResponseStart, 500);
+                }})();
+            </script>
+            """,
+            height=0,
+            width=0
+        )
 
     # Save assistant message with sources & agent_trace to history
     st.session_state.messages.append({

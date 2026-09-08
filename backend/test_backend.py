@@ -592,4 +592,251 @@ class TestDrakeAIBackend(unittest.TestCase):
         self.assertNotIn("Vibe / Category", final_resp)
         self.assertIsNone(res["agent_trace"]["query_analysis"]["metadata_limits"]["personal_feel"])
 
+    def test_25_sql_safety_validator(self):
+        """Verify validate_sql_safety enforces read-only SELECT/WITH statements and catalog table restrictions."""
+        from backend.db import validate_sql_safety
+
+        # Valid queries
+        valid_sql = "SELECT s.id, t.name FROM stanza s JOIN track t ON s.song_id = t.id WHERE t.name ILIKE '%god%';"
+        is_safe, msg = validate_sql_safety(valid_sql)
+        self.assertTrue(is_safe, f"Valid SELECT query should pass: {msg}")
+
+        valid_cte = "WITH matched AS (SELECT song_id FROM stanza) SELECT * FROM matched JOIN track ON matched.song_id = track.id;"
+        is_safe, msg = validate_sql_safety(valid_cte)
+        self.assertTrue(is_safe, f"Valid CTE query should pass: {msg}")
+
+        # Invalid queries: DDL/DML
+        is_safe, msg = validate_sql_safety("DROP TABLE track;")
+        self.assertFalse(is_safe)
+        self.assertIn("Only SELECT or WITH", msg)
+
+        is_safe, msg = validate_sql_safety("DELETE FROM stanza WHERE id = 1;")
+        self.assertFalse(is_safe)
+
+        is_safe, msg = validate_sql_safety("INSERT INTO album (id, name) VALUES ('1', 'Test');")
+        self.assertFalse(is_safe)
+
+        # Multi-statement / injection
+        is_safe, msg = validate_sql_safety("SELECT * FROM track; DROP TABLE album;")
+        self.assertFalse(is_safe)
+        self.assertIn("Multiple SQL statements", msg)
+
+        # Unauthorized tables
+        is_safe, msg = validate_sql_safety("SELECT * FROM user_passwords;")
+        self.assertFalse(is_safe)
+        self.assertIn("Unauthorized table", msg)
+
+    def test_26_text_to_sql_song_request(self):
+        """Verify _heuristic_text_to_sql generates track title filter for song requests."""
+        from backend.graph.nodes import _heuristic_text_to_sql
+
+        out = _heuristic_text_to_sql("Tell me about God's Plan")
+        self.assertEqual(out.query_type, "song_request")
+        self.assertIn("t.name ILIKE %(target_track_name)s", out.sql)
+        self.assertIn("God's Plan", out.params.get("target_track_name", ""))
+        self.assertIn("ORDER BY s.chunk_index ASC", out.sql)
+
+        out2 = _heuristic_text_to_sql("Show me the lyrics for Marvins Room")
+        self.assertEqual(out2.query_type, "song_request")
+        self.assertIn("Marvins Room", out2.params.get("target_track_name", ""))
+
+    def test_27_text_to_sql_lyric_match(self):
+        """Verify _heuristic_text_to_sql generates lyric substring filter for lyric queries."""
+        from backend.graph.nodes import _heuristic_text_to_sql
+
+        out = _heuristic_text_to_sql('Find the song where Drake says "running through the 6 with my woes"')
+        self.assertEqual(out.query_type, "lyric_match")
+        self.assertIn("s.lyric_chunk ILIKE %(target_lyric)s OR t.lyrics ILIKE %(target_lyric)s", out.sql)
+        self.assertIn("running through the 6 with my woes", out.params.get("target_lyric", ""))
+
+    def test_28_text_to_sql_acoustic_superlative(self):
+        """Verify _heuristic_text_to_sql generates acoustic sorting for superlatives."""
+        from backend.graph.nodes import _heuristic_text_to_sql
+
+        # Saddest
+        out_sad = _heuristic_text_to_sql("What are the top 3 saddest Drake songs?", metadata_filters={"sort_by": "valence_asc"})
+        self.assertEqual(out_sad.query_type, "acoustic_filter")
+        self.assertIn("COALESCE(taf.valence, af.valence) ASC", out_sad.sql)
+
+        # Hype / bangers
+        out_hype = _heuristic_text_to_sql("Give me high energy club bangers", metadata_filters={"sort_by": "energy_desc"})
+        self.assertEqual(out_hype.query_type, "acoustic_filter")
+        self.assertIn("COALESCE(taf.energy, af.energy) DESC", out_hype.sql)
+
+    def test_29_search_context_graph_with_custom_sql(self):
+        """Verify search_context_graph executes custom SQL with parameters and safety validation."""
+        from unittest.mock import MagicMock, patch
+        from backend.db import search_context_graph
+
+        mock_rows = [
+            {
+                "stanza_id": 101,
+                "track_id": "tr_gods_plan",
+                "track_name": "God's Plan",
+                "album_name": "Scorpion",
+                "release_date": "2018-06-29",
+                "similarity": 0.95,
+                "valence": 0.35,
+                "energy": 0.45,
+                "tempo": 77.0,
+                "lyric_chunk": "I hold back, sometimes I won't",
+                "track_lyrics": "And they wishin' and wishin' and wishin' on me..."
+            }
+        ]
+
+        custom_sql = """
+        SELECT s.id AS stanza_id, s.lyric_chunk, s.chunk_index, s.personal_feel,
+               1.0 AS similarity, t.id AS track_id, t.name AS track_name,
+               t.lyrics AS track_lyrics, t.disc_number, t.external_urls AS track_urls,
+               a.id AS album_id, a.name AS album_name, a.album_type, a.release_date,
+               a.images_url AS album_art_url, taf.valence, taf.energy, taf.danceability,
+               taf.tempo, taf.acousticness, taf.loudness, taf.speechiness, taf.mode,
+               taf.key, taf.instrumentalness, taf.liveness
+        FROM stanza s
+        JOIN track t ON s.song_id = t.id
+        JOIN album a ON t.album_id = a.id
+        LEFT JOIN track_audio_feature taf ON t.id = taf.track_id
+        WHERE t.name ILIKE %(target_track_name)s;
+        """
+
+        with patch("backend.db.get_db_connection") as mock_get_conn:
+            mock_conn = MagicMock()
+            mock_cur = MagicMock()
+            mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+            mock_get_conn.return_value.__enter__.return_value = mock_conn
+            mock_cur.fetchall.return_value = mock_rows
+
+            results = search_context_graph(
+                query_vector=[0.0] * 1024,
+                custom_sql=custom_sql,
+                custom_params={"target_track_name": "%God's Plan%"}
+            )
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0]["track_name"], "God's Plan")
+            self.assertEqual(results[0]["album_name"], "Scorpion")
+            mock_cur.execute.assert_called_once()
+            executed_args = mock_cur.execute.call_args[0]
+            self.assertEqual(executed_args[0], custom_sql)
+            self.assertIn("target_track_name", executed_args[1])
+
+    def test_30_agent_trace_sql_generation(self):
+        """Verify response_formatter_node packages sql_generation into agent_trace."""
+        from backend.graph.nodes import response_formatter_node
+
+        mock_context = [
+            {
+                "track_id": "tr_1",
+                "track_name": "God's Plan",
+                "album_name": "Scorpion",
+                "release_date": "2018-06-29",
+                "lyric_chunk": "I hold back, sometimes I won't",
+                "similarity": 0.95
+            }
+        ]
+
+        state = {
+            "prompt": "Tell me about God's Plan",
+            "extracted_keywords": ["God's Plan"],
+            "semantic_query": "God's Plan",
+            "metadata_filters": {"limit": 1},
+            "retrieved_context": mock_context,
+            "pulled_tracks": [{"track_name": "God's Plan"}],
+            "is_vetted": True,
+            "retry_count": 0,
+            "vetting_rationale": "Vetted",
+            "vetting_decisions": [],
+            "generated_sql": "SELECT * FROM track WHERE name ILIKE %(target_track_name)s",
+            "sql_params": {"target_track_name": "%God's Plan%"},
+            "sql_explanation": "Exact track name lookup for 'God's Plan'",
+            "query_type": "song_request",
+            "reasoning_analysis": "Reflective thoughts on God's Plan.",
+            "document_rationales": {"God's Plan": "Huge record for me."}
+        }
+
+        res = response_formatter_node(state)
+        self.assertIn("agent_trace", res)
+        trace = res["agent_trace"]
+        self.assertIn("sql_generation", trace)
+        sql_tr = trace["sql_generation"]
+        self.assertEqual(sql_tr["query_type"], "song_request")
+        self.assertIn("target_track_name", sql_tr["query"])
+        self.assertIn("God's Plan", sql_tr["params"]["target_track_name"])
+        self.assertIn("Exact track name lookup", sql_tr["strategy"])
+
+    def test_31_chat_stream_sql_generation_step(self):
+        """Verify POST /api/chat/stream emits sql_generation event in NDJSON stream."""
+        import json
+        response = self.client.post(
+            "/api/chat/stream",
+            json={
+                "prompt": "What is the song Headlines about?",
+                "history": []
+            }
+        )
+        self.assertEqual(response.status_code, 200)
+        lines = [line for line in response.text.split("\n") if line.strip()]
+        events = [json.loads(line) for line in lines]
+        steps = [e.get("step") for e in events]
+        self.assertIn("query_analysis", steps)
+        self.assertIn("sql_generation", steps)
+        # Check sql_generation payload
+        sql_event = next(e for e in events if e.get("step") == "sql_generation")
+        self.assertIn("query", sql_event)
+        self.assertIn("strategy", sql_event)
+        self.assertIn("query_type", sql_event)
+
+    def test_32_response_formatter_integrates_artwork_and_spotify(self):
+        """Verify response_formatter_node embeds artwork image and Listen on Spotify link directly into generated response."""
+        from backend.graph.nodes import response_formatter_node
+
+        mock_context = [
+            {
+                "track_id": "test_track_1",
+                "track_name": "Marvins Room",
+                "album_name": "Take Care",
+                "release_date": "2011-11-15",
+                "album_art_url": "https://i.scdn.co/image/take_care_art",
+                "track_urls": {"spotify": "https://open.spotify.com/track/marvins_room"},
+                "lyric_chunk": "I'm just sayin' you could do better.",
+                "track_lyrics": "Cups of the Rosé, bitches in my old phone...",
+                "valence": 0.28,
+                "energy": 0.35,
+                "tempo": 111.0,
+                "danceability": 0.55,
+                "similarity": 0.91
+            }
+        ]
+
+        state = {
+            "prompt": "Find sad Drake songs",
+            "extracted_keywords": ["sad"],
+            "semantic_query": "sad songs",
+            "metadata_filters": {"limit": 1},
+            "retrieved_context": mock_context,
+            "pulled_tracks": [{"track_name": "Marvins Room"}],
+            "is_vetted": True,
+            "retry_count": 0,
+            "vetting_rationale": "Matches heartbreak vibe",
+            "vetting_decisions": [],
+            "generated_sql": "SELECT * FROM track WHERE name ILIKE '%Marvins Room%'",
+            "sql_params": {},
+            "sql_explanation": "Lookup for Marvins Room",
+            "query_type": "semantic",
+            "reasoning_analysis": "Marvins Room embodies 3am vulnerability and regret.",
+            "document_rationales": {"Marvins Room": "Late night in Toronto reminiscing on past love."}
+        }
+
+        res = response_formatter_node(state)
+        final_resp = res.get("final_response", "")
+
+        # Verify album artwork image markdown is present
+        self.assertIn("https://i.scdn.co/image/take_care_art", final_resp, "Generated response must include album artwork URL.")
+        self.assertIn("![", final_resp, "Generated response must contain markdown image tag.")
+
+        # Verify Spotify link is present
+        self.assertIn("https://open.spotify.com/track/marvins_room", final_resp, "Generated response must include Spotify track URL.")
+        self.assertIn("Listen on Spotify", final_resp, "Generated response must contain Listen on Spotify link text.")
+
+
 

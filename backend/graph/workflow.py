@@ -11,6 +11,7 @@ from backend.graph.nodes import (
     out_of_scope_node,
     reasoning_agent_node,
     response_formatter_node,
+    text_to_sql_node,
     vet_track_node,
 )
 from backend.graph.state import AgentState
@@ -20,10 +21,10 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 2
 
 
-def route_guardrail(state: AgentState) -> Literal["hybrid_retrieval", "out_of_scope"]:
+def route_guardrail(state: AgentState) -> Literal["text_to_sql", "out_of_scope"]:
     """Conditional router based on relevance determination."""
     if state.get("is_relevant", False):
-        return "hybrid_retrieval"
+        return "text_to_sql"
     return "out_of_scope"
 
 
@@ -51,6 +52,7 @@ def create_chat_graph():
 
     # 1. Add nodes
     workflow.add_node("guardrail_intent", guardrail_intent_node)
+    workflow.add_node("text_to_sql", text_to_sql_node)
     workflow.add_node("hybrid_retrieval", hybrid_retrieval_node)
     workflow.add_node("vet_track", vet_track_node)
     workflow.add_node("reasoning_agent", reasoning_agent_node)
@@ -65,12 +67,15 @@ def create_chat_graph():
         "guardrail_intent",
         route_guardrail,
         {
-            "hybrid_retrieval": "hybrid_retrieval",
+            "text_to_sql": "text_to_sql",
             "out_of_scope": "out_of_scope"
         }
     )
 
-    # 4. In-Scope Pipeline edges: retrieval -> vet_track
+    # 4. Text-to-SQL -> Knowledge Retrieval Layer
+    workflow.add_edge("text_to_sql", "hybrid_retrieval")
+
+    # 5. In-Scope Pipeline edges: retrieval -> vet_track
     workflow.add_edge("hybrid_retrieval", "vet_track")
 
     # 5. Conditional Edge for Vetting & Retry loop

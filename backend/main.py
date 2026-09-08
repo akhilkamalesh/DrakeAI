@@ -115,7 +115,15 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         "reasoning_analysis": None,
         "document_rationales": {},
         "final_response": "",
-        "sources": []
+        "sources": [],
+        "extracted_keywords": [],
+        "pulled_tracks": [],
+        "vetting_decisions": [],
+        "generated_sql": None,
+        "sql_params": None,
+        "sql_explanation": None,
+        "query_type": None,
+        "agent_trace": None
     }
 
     try:
@@ -141,7 +149,7 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
 async def chat_stream_endpoint(request: ChatRequest):
     """
     Streams the agent thought process and pipeline breakdown in real time:
-    query_analysis -> pulled_songs -> vetting_agent -> reasoning -> complete
+    query_analysis -> sql_generation -> pulled_songs -> vetting_agent -> reasoning -> complete
     """
     if not request.prompt or not request.prompt.strip():
         raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
@@ -166,6 +174,10 @@ async def chat_stream_endpoint(request: ChatRequest):
         "extracted_keywords": [],
         "pulled_tracks": [],
         "vetting_decisions": [],
+        "generated_sql": None,
+        "sql_params": None,
+        "sql_explanation": None,
+        "query_type": None,
         "agent_trace": None
     }
 
@@ -195,6 +207,16 @@ async def chat_stream_endpoint(request: ChatRequest):
                                 "album_name": mf.get("album_name")
                             },
                             "is_relevant": state_update.get("is_relevant", True)
+                        }
+                        yield json.dumps(event) + "\n"
+
+                    elif node_name == "text_to_sql":
+                        event = {
+                            "step": "sql_generation",
+                            "query": state_update.get("generated_sql"),
+                            "strategy": state_update.get("sql_explanation"),
+                            "query_type": state_update.get("query_type"),
+                            "params": state_update.get("sql_params", {})
                         }
                         yield json.dumps(event) + "\n"
 

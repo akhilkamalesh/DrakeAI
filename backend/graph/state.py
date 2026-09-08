@@ -23,4 +23,8 @@ class AgentState(TypedDict):
     extracted_keywords: Optional[List[str]]
     pulled_tracks: Optional[List[Dict[str, Any]]]
     vetting_decisions: Optional[List[Dict[str, Any]]]
+    generated_sql: Optional[str]
+    sql_params: Optional[Dict[str, Any]]
+    sql_explanation: Optional[str]
+    query_type: Optional[str]
     agent_trace: Optional[Dict[str, Any]]

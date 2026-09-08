@@ -119,6 +119,31 @@ class IntentOutput(BaseModel):
         return v
 
 
+class SQLAgentOutput(BaseModel):
+    sql: str = Field(
+        description="The generated PostgreSQL query string incorporating joins, where filters, and ordering."
+    )
+    params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Named parameters dictionary for psycopg2 parameter binding."
+    )
+    explanation: str = Field(
+        default="",
+        description="Natural language explanation of the query retrieval strategy."
+    )
+    query_type: str = Field(
+        default="hybrid_semantic",
+        description="Categorization of the query intent (e.g. song_request, lyric_match, acoustic_filter, hybrid_semantic)."
+    )
+
+
+class SQLGenerationTrace(BaseModel):
+    query: str
+    strategy: str
+    query_type: str
+    params: Dict[str, Any] = Field(default_factory=dict)
+
+
 class TrackVettingResult(BaseModel):
     is_match: bool = Field(
         description="True if the candidate parent track genuinely matches the user's thematic and emotional intent, False otherwise."

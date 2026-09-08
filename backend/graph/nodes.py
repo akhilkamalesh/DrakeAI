@@ -15,7 +15,7 @@ import requests
 from backend.gemini import call_gemini
 
 from backend.config import settings
-from backend.db import search_context_graph
+from backend.db import CONTEXT_GRAPH_SQL, search_context_graph, validate_sql_safety
 from backend.embeddings import get_embedder
 from backend.graph.state import AgentState
 from backend.models import (
@@ -25,6 +25,7 @@ from backend.models import (
     IntentOutput,
     MetadataFilters,
     ReasoningAgentOutput,
+    SQLAgentOutput,
     SourceItem,
     TrackMatchAnalysis,
     TrackVettingResult,
@@ -54,6 +55,22 @@ KNOWN_ALBUMS = [
     "More Life",
     "Care Package",
     "Dark Lane Demo Tapes"
+]
+
+# Drake prominent tracks for heuristic song request matching
+KNOWN_TRACKS = [
+    "God's Plan", "Hotline Bling", "Headlines", "Marvins Room", "Started From the Bottom",
+    "Passionfruit", "In My Feelings", "Hold On, We're Going Home", "One Dance", "Nonstop",
+    "Laugh Now Cry Later", "Rich Flex", "First Person Shooter", "Nice For What", "Controlla",
+    "The Motto", "Best I Ever Had", "Too Good", "Find Your Love", "Energy", "Know Yourself",
+    "Jumpman", "Doing It Wrong", "Take Care", "Over", "Trust Issues", "From Time", "Pound Cake",
+    "Tuscan Leather", "Wu-Tang Forever", "Worst Behavior", "All Me", "Furthest Thing", "Feel No Ways",
+    "Childs Play", "Fire & Desire", "Bria's Interlude", "Jaded", "Mob Ties", "Survival",
+    "Emotionless", "8 Out of 10", "Can't Take a Joke", "Sandra's Rose", "Talk Up", "Is There More",
+    "Champagne Poetry", "Papi's Home", "Girls Want Girls", "Fair Trade", "Way 2 Sexy", "TSU",
+    "Knife Talk", "Race My Mind", "Fountains", "Get Along Better", "You Only Live Twice",
+    "Jimmy Cooks", "Massive", "Sticky", "Texts Go Green", "Falling Back", "Search & Rescue",
+    "Slime You Out", "Virginia Beach", "IDGAF", "Rich Baby Daddy", "Drew A Picasso"
 ]
 
 
@@ -354,16 +371,294 @@ def guardrail_intent_node(state: AgentState) -> Dict[str, Any]:
     }
 
 
+BASE_CONTEXT_PROJECTION = """
+SELECT 
+    s.id AS stanza_id,
+    s.lyric_chunk,
+    s.chunk_index,
+    s.personal_feel,
+    1 - (s.embedding <=> %(query_vector)s::vector(1024)) AS similarity,
+    t.id AS track_id,
+    t.name AS track_name,
+    t.lyrics AS track_lyrics,
+    t.disc_number,
+    t.external_urls AS track_urls,
+    a.id AS album_id,
+    a.name AS album_name,
+    a.album_type,
+    a.release_date,
+    a.images_url AS album_art_url,
+    COALESCE(taf.valence, af.valence) AS valence,
+    COALESCE(taf.energy, af.energy) AS energy,
+    COALESCE(taf.danceability, af.danceability) AS danceability,
+    COALESCE(taf.tempo, af.tempo) AS tempo,
+    COALESCE(taf.acousticness, af.acousticness) AS acousticness,
+    COALESCE(taf.loudness, af.loudness) AS loudness,
+    COALESCE(taf.speechiness, af.speechiness) AS speechiness,
+    COALESCE(taf.mode, af.mode) AS mode,
+    COALESCE(taf.key, af.key) AS key,
+    COALESCE(taf.instrumentalness, af.instrumentalness) AS instrumentalness,
+    COALESCE(taf.liveness, af.liveness) AS liveness
+FROM stanza s
+JOIN track t ON s.song_id = t.id
+JOIN album a ON t.album_id = a.id
+LEFT JOIN track_audio_feature taf ON t.id = taf.track_id
+LEFT JOIN audio_feature af ON t.id = af.song_id
+"""
+
+
+def _heuristic_text_to_sql(
+    prompt: str,
+    semantic_query: Optional[str] = None,
+    metadata_filters: Optional[Dict[str, Any]] = None
+) -> SQLAgentOutput:
+    """
+    Deterministic rule-based query synthesizer when LLM is unavailable or offline.
+    Detects song requests, quoted lyrics, acoustic superlatives, and metadata filters.
+    """
+    prompt_lower = prompt.lower()
+    mf = metadata_filters or {}
+
+    # 1. Quoted Lyric Match Check
+    quoted_matches = re.findall(r"['\"]([^'\"]{4,})['\"]", prompt)
+    lyric_snippet = None
+    if quoted_matches:
+        lyric_snippet = quoted_matches[0]
+    elif any(kw in prompt_lower for kw in ["lyrics where", "lyrics that say", "lyric where", "song where", "line where", "says"]):
+        lyric_trigger = re.search(r"\b(?:lyrics?\s+(?:where|with|about|that\s+say|saying)?|says?|lines?)\s+([a-zA-Z0-9\s',]+)", prompt_lower)
+        if lyric_trigger:
+            raw_lyric = lyric_trigger.group(1).strip()
+            words = [w for w in raw_lyric.split() if w not in ("in", "on", "by", "from", "album", "take", "care", "drake")]
+            if len(words) >= 2:
+                lyric_snippet = " ".join(words[:6])
+
+    if lyric_snippet:
+        sql = f"""{BASE_CONTEXT_PROJECTION.strip()}
+WHERE (%(excluded_track_ids)s IS NULL OR NOT (t.id = ANY(%(excluded_track_ids)s)))
+  AND (s.lyric_chunk ILIKE %(target_lyric)s OR t.lyrics ILIKE %(target_lyric)s)
+ORDER BY s.embedding <=> %(query_vector)s::vector(1024) ASC
+LIMIT %(fetch_limit)s;"""
+        return SQLAgentOutput(
+            sql=sql,
+            params={"target_lyric": f"%{lyric_snippet}%"},
+            explanation=f"Lyric substring search for '{lyric_snippet}' across stanzas and parent track lyrics.",
+            query_type="lyric_match"
+        )
+
+    # 2. Acoustic Superlatives & Metadata Filter
+    sort_by = mf.get("sort_by")
+    is_superlative = (
+        sort_by in ("valence_asc", "valence_desc", "energy_desc", "tempo_asc", "danceability_desc")
+        or any(w in prompt_lower for w in ["saddest", "most sad", "high energy", "club bangers", "slowest"])
+    )
+    if is_superlative:
+        alb_name = mf.get("album_name")
+        yr_before = mf.get("release_year_before")
+        yr_after = mf.get("release_year_after")
+
+        where_clauses = [
+            "(%(excluded_track_ids)s IS NULL OR NOT (t.id = ANY(%(excluded_track_ids)s)))"
+        ]
+        if alb_name:
+            where_clauses.append("(%(album_name)s IS NULL OR a.name ILIKE '%%' || %(album_name)s || '%%')")
+        if yr_before:
+            where_clauses.append("(%(release_year_before)s IS NULL OR EXTRACT(YEAR FROM a.release_date) < %(release_year_before)s)")
+        if yr_after:
+            where_clauses.append("(%(release_year_after)s IS NULL OR EXTRACT(YEAR FROM a.release_date) > %(release_year_after)s)")
+
+        order_clause = "s.embedding <=> %(query_vector)s::vector(1024) ASC"
+        strategy_desc = "Hybrid semantic context graph retrieval via vector cosine similarity"
+        q_type = "acoustic_filter"
+
+        if sort_by == "valence_asc" or "saddest" in prompt_lower or "most sad" in prompt_lower:
+            order_clause = "COALESCE(taf.valence, af.valence) ASC, s.embedding <=> %(query_vector)s::vector(1024) ASC"
+            strategy_desc = "Acoustic valence minimization (saddest tracks) combined with semantic relevance"
+        elif sort_by == "energy_desc" or "high energy" in prompt_lower or "bangers" in prompt_lower:
+            order_clause = "COALESCE(taf.energy, af.energy) DESC, s.embedding <=> %(query_vector)s::vector(1024) ASC"
+            strategy_desc = "Acoustic energy maximization (club bangers/hype) combined with semantic relevance"
+        elif sort_by == "tempo_asc" or "slowest" in prompt_lower:
+            order_clause = "COALESCE(taf.tempo, af.tempo) ASC, s.embedding <=> %(query_vector)s::vector(1024) ASC"
+            strategy_desc = "Acoustic tempo minimization (slowest songs) combined with semantic relevance"
+
+        where_str = "\n  AND ".join(where_clauses)
+        sql = f"""{BASE_CONTEXT_PROJECTION.strip()}
+WHERE {where_str}
+ORDER BY {order_clause}
+LIMIT %(fetch_limit)s;"""
+
+        return SQLAgentOutput(
+            sql=sql,
+            params={},
+            explanation=strategy_desc,
+            query_type=q_type
+        )
+
+    # 3. Track Search Check
+    AMBIGUOUS_TRACK_WORDS = {"energy", "over", "survival", "hype", "banger"}
+    matched_track = None
+    prompt_norm = re.sub(r"['’]", "", prompt_lower)
+
+    for tr in KNOWN_TRACKS:
+        tr_lower = tr.lower()
+        tr_norm = re.sub(r"['’]", "", tr_lower)
+        if tr_lower in AMBIGUOUS_TRACK_WORDS:
+            pattern = r"\b(?:song|track|record)\s+['\"]?" + re.escape(tr_norm) + r"['\"]?\b|['\"]" + re.escape(tr_norm) + r"['\"]"
+            if re.search(pattern, prompt_norm):
+                matched_track = tr
+                break
+        else:
+            pattern = r"\b" + re.escape(tr_norm) + r"\b"
+            if re.search(pattern, prompt_norm):
+                matched_track = tr
+                break
+
+    if not matched_track:
+        title_match = re.search(r"\b(?:song|track|record)\s+['\"]([a-zA-Z0-9\s'’-]+)['\"]", prompt_lower)
+        if title_match:
+            candidate = title_match.group(1).strip()
+            if len(candidate) > 2 and candidate not in ("by", "drake", "about", "with", "from"):
+                matched_track = candidate
+
+    if matched_track:
+        sql = f"""{BASE_CONTEXT_PROJECTION.strip()}
+WHERE (%(excluded_track_ids)s IS NULL OR NOT (t.id = ANY(%(excluded_track_ids)s)))
+  AND t.name ILIKE %(target_track_name)s
+ORDER BY s.chunk_index ASC
+LIMIT %(fetch_limit)s;"""
+        return SQLAgentOutput(
+            sql=sql,
+            params={"target_track_name": f"%{matched_track}%"},
+            explanation=f"Exact track name lookup for '{matched_track}' ordered by lyrical progression.",
+            query_type="song_request"
+        )
+
+    # 4. Default Hybrid Semantic Context Graph
+    alb_name = mf.get("album_name")
+    yr_before = mf.get("release_year_before")
+    yr_after = mf.get("release_year_after")
+
+    where_clauses = [
+        "(%(excluded_track_ids)s IS NULL OR NOT (t.id = ANY(%(excluded_track_ids)s)))"
+    ]
+    if alb_name:
+        where_clauses.append("(%(album_name)s IS NULL OR a.name ILIKE '%%' || %(album_name)s || '%%')")
+    if yr_before:
+        where_clauses.append("(%(release_year_before)s IS NULL OR EXTRACT(YEAR FROM a.release_date) < %(release_year_before)s)")
+    if yr_after:
+        where_clauses.append("(%(release_year_after)s IS NULL OR EXTRACT(YEAR FROM a.release_date) > %(release_year_after)s)")
+
+    where_str = "\n  AND ".join(where_clauses)
+    sql = f"""{BASE_CONTEXT_PROJECTION.strip()}
+WHERE {where_str}
+ORDER BY s.embedding <=> %(query_vector)s::vector(1024) ASC
+LIMIT %(fetch_limit)s;"""
+
+    return SQLAgentOutput(
+        sql=sql,
+        params={},
+        explanation="Hybrid semantic context graph retrieval via vector cosine similarity",
+        query_type="hybrid_semantic"
+    )
+
+
+def text_to_sql_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Stage 1.5: Text-to-SQL Agent (LLM Call).
+    Translates user query, semantic expansion, audio profiles, and metadata constraints
+    into a flexible, parameterized PostgreSQL query joining the context graph.
+    """
+    prompt = state["prompt"]
+    semantic_query = state.get("semantic_query") or prompt
+    metadata_filters = state.get("metadata_filters", {})
+    history = state.get("history", [])
+
+    system_instruction = (
+        "You are the Text-to-SQL Agent for DrakeAI, specialized in translating natural language queries "
+        "about Drake's songs, albums, lyrics, and Spotify audio features into safe, high-performance PostgreSQL queries.\n\n"
+        "DATABASE SCHEMA:\n"
+        "- stanza (id, song_id, lyric_chunk, chunk_index, embedding vector(1024), personal_feel)\n"
+        "- track (id, album_id, disc_number, name, lyrics, external_urls)\n"
+        "- album (id, name, album_type, images_url, release_date, total_tracks)\n"
+        "- track_audio_feature (track_id, valence, energy, danceability, tempo, acousticness, loudness, speechiness, mode, key, instrumentalness, liveness)\n"
+        "- audio_feature (song_id, valence, energy, danceability, tempo, acousticness, loudness, speechiness, mode, key, instrumentalness, liveness)\n\n"
+        "QUERY REQUIREMENTS:\n"
+        "1. MUST be a read-only SELECT query.\n"
+        "2. MUST JOIN stanza s, track t (ON s.song_id = t.id), album a (ON t.album_id = a.id), "
+        "and LEFT JOIN track_audio_feature taf (ON t.id = taf.track_id) and LEFT JOIN audio_feature af (ON t.id = af.song_id).\n"
+        "3. MUST project all standard context columns: s.id AS stanza_id, s.lyric_chunk, s.chunk_index, s.personal_feel, "
+        "1 - (s.embedding <=> %(query_vector)s::vector(1024)) AS similarity, t.id AS track_id, t.name AS track_name, "
+        "t.lyrics AS track_lyrics, t.disc_number, t.external_urls AS track_urls, a.id AS album_id, a.name AS album_name, "
+        "a.album_type, a.release_date, a.images_url AS album_art_url, COALESCE(taf.valence, af.valence) AS valence, "
+        "COALESCE(taf.energy, af.energy) AS energy, COALESCE(taf.danceability, af.danceability) AS danceability, "
+        "COALESCE(taf.tempo, af.tempo) AS tempo, COALESCE(taf.acousticness, af.acousticness) AS acousticness, "
+        "COALESCE(taf.loudness, af.loudness) AS loudness, COALESCE(taf.speechiness, af.speechiness) AS speechiness, "
+        "COALESCE(taf.mode, af.mode) AS mode, COALESCE(taf.key, af.key) AS key, "
+        "COALESCE(taf.instrumentalness, af.instrumentalness) AS instrumentalness, COALESCE(taf.liveness, af.liveness) AS liveness.\n"
+        "4. Include exclusion filter: (%(excluded_track_ids)s IS NULL OR NOT (t.id = ANY(%(excluded_track_ids)s))).\n"
+        "5. For song requests (e.g. 'God's Plan', 'Marvins Room'): filter t.name ILIKE %(target_track_name)s.\n"
+        "6. For lyric matching: filter (s.lyric_chunk ILIKE %(target_lyric)s OR t.lyrics ILIKE %(target_lyric)s).\n"
+        "7. For acoustic superlatives (e.g. 'saddest', 'most hype'): sort by acoustic features appropriately (e.g. valence ASC, energy DESC).\n"
+        "8. For semantic queries: order by s.embedding <=> %(query_vector)s::vector(1024) ASC.\n"
+        "9. End with LIMIT %(fetch_limit)s.\n\n"
+        "Respond ONLY with a JSON object matching this schema:\n"
+        "{\n"
+        "  \"sql\": \"SELECT ...\",\n"
+        "  \"params\": {\"target_track_name\": \"%God's Plan%\"},\n"
+        "  \"explanation\": \"One-sentence explanation of query strategy.\",\n"
+        "  \"query_type\": \"song_request\" | \"lyric_match\" | \"acoustic_filter\" | \"hybrid_semantic\"\n"
+        "}"
+    )
+
+    query_eval_prompt = (
+        f"User Prompt: {prompt}\n"
+        f"Semantic Query: {semantic_query}\n"
+        f"Metadata Constraints: {json.dumps(metadata_filters)}\n"
+        "Generate the optimal PostgreSQL query and parameters for this request."
+    )
+
+    sql_output: Optional[SQLAgentOutput] = None
+    try:
+        raw_res = call_gemini(
+            prompt=query_eval_prompt,
+            system_instruction=system_instruction,
+            history=history[-2:] if history else None,
+            temperature=0.0,
+            json_mode=True,
+            timeout=15.0
+        )
+        cleaned = _clean_llm_json(raw_res)
+        parsed = json.loads(cleaned)
+        candidate = SQLAgentOutput.model_validate(parsed)
+        is_safe, reason = validate_sql_safety(candidate.sql)
+        if is_safe:
+            sql_output = candidate
+        else:
+            logger.warning("Gemini generated unsafe SQL: %s. Using heuristic fallback.", reason)
+            sql_output = _heuristic_text_to_sql(prompt, semantic_query, metadata_filters)
+    except Exception as e:
+        logger.warning("Gemini Text-to-SQL generation failed or timed out: %s. Using heuristic fallback.", e)
+        sql_output = _heuristic_text_to_sql(prompt, semantic_query, metadata_filters)
+
+    return {
+        "generated_sql": sql_output.sql,
+        "sql_params": sql_output.params,
+        "sql_explanation": sql_output.explanation,
+        "query_type": sql_output.query_type
+    }
+
+
 def hybrid_retrieval_node(state: AgentState) -> Dict[str, Any]:
     """
     Node 2: Deterministic Python Node.
-    Encodes semantic query into a 1024-d dense vector and executes parameterized
-    parent-child context graph query against PostgreSQL.
+    Encodes semantic query into a 1024-d dense vector and executes the Text-to-SQL
+    agent's dynamic SQL query against PostgreSQL.
     Excludes any track IDs rejected during vetting retries.
     """
     query_text = state.get("semantic_query") or state.get("prompt") or ""
     metadata_filters = state.get("metadata_filters", {})
     excluded_track_ids = state.get("excluded_track_ids", [])
+    custom_sql = state.get("generated_sql")
+    custom_params = state.get("sql_params")
 
     embedder = get_embedder()
     query_vector = embedder.embed_query(query_text)
@@ -371,7 +666,9 @@ def hybrid_retrieval_node(state: AgentState) -> Dict[str, Any]:
     retrieved_context = search_context_graph(
         query_vector=query_vector,
         filters=metadata_filters,
-        excluded_track_ids=excluded_track_ids
+        excluded_track_ids=excluded_track_ids,
+        custom_sql=custom_sql,
+        custom_params=custom_params
     )
 
     pulled_tracks = []
@@ -876,6 +1173,80 @@ def reasoning_agent_node(state: AgentState) -> Dict[str, Any]:
 
 
 
+def _integrate_artwork_and_links(text: str, sources: List[Dict[str, Any]]) -> str:
+    """
+    Ensures that for every source track, the album artwork image and Listen on Spotify
+    link are integrated directly into its section in the generated markdown response.
+    """
+    if not text or not sources:
+        return text
+
+    updated_text = text
+
+    for src in sources:
+        track_name = src.get("track_name")
+        if not track_name:
+            continue
+
+        album_name = src.get("album_name", "Album Artwork")
+        art_url = src.get("album_art_url")
+        spotify_url = src.get("spotify_url")
+
+        # Replace any literal placeholders that LLM might output
+        if art_url:
+            updated_text = re.sub(
+                rf"!\[(.*?)\]\((?:art_url|album_art_url|Album Art URL|image_url)\)",
+                f"![\\1]({art_url})",
+                updated_text,
+                flags=re.IGNORECASE
+            )
+        if spotify_url:
+            updated_text = re.sub(
+                rf"\[(.*?)\]\((?:spotify_url|Spotify URL|link_url)\)",
+                f"[\\1]({spotify_url})",
+                updated_text,
+                flags=re.IGNORECASE
+            )
+
+        has_image = bool(art_url and art_url in updated_text)
+        has_spotify = bool(spotify_url and spotify_url in updated_text)
+
+        # If both are already present in the text, no further injection needed for this track
+        if (has_image or not art_url) and (has_spotify or not spotify_url):
+            continue
+
+        # Build media snippet to inject
+        media_parts = []
+        if art_url and not has_image:
+            media_parts.append(f"![{album_name}]({art_url})")
+        if spotify_url and not has_spotify:
+            media_parts.append(f"[▶ Listen on Spotify]({spotify_url})")
+
+        if not media_parts:
+            continue
+
+        media_block = "\n" + "\n".join(media_parts) + "\n"
+
+        # Try to find the heading or bold mention for this track
+        pattern = rf"(#+\s*.*?\b{re.escape(track_name)}\b[^\n]*|\*\*[^\n]*?\b{re.escape(track_name)}\b[^\n]*?\*\*)"
+        match = re.search(pattern, updated_text, re.IGNORECASE)
+
+        if match:
+            end_pos = match.end()
+            updated_text = updated_text[:end_pos] + "\n" + media_block + updated_text[end_pos:]
+        else:
+            name_pos = updated_text.lower().find(track_name.lower())
+            if name_pos != -1:
+                line_end = updated_text.find("\n", name_pos)
+                if line_end == -1:
+                    line_end = len(updated_text)
+                updated_text = updated_text[:line_end] + "\n" + media_block + updated_text[line_end:]
+            else:
+                updated_text += f"\n\n### **{track_name}** — *{album_name}*\n" + media_block
+
+    return updated_text
+
+
 def response_formatter_node(state: AgentState) -> Dict[str, Any]:
     """
     Node 4: Response Formatter & Citation Agent (LLM Call #3 / Synthesizer).
@@ -908,6 +1279,8 @@ def response_formatter_node(state: AgentState) -> Dict[str, Any]:
         feel = src.get("personal_feel", "N/A")
         rationale = document_rationales.get(track, "")
         quotes = "\n".join(src.get("quoted_stanzas", []))
+        art_url = src.get("album_art_url") or ""
+        spotify_url = src.get("spotify_url") or ""
 
         af_info = []
         if src.get("valence") is not None:
@@ -920,8 +1293,13 @@ def response_formatter_node(state: AgentState) -> Dict[str, Any]:
             af_info.append(f"Danceability: {src['danceability']}")
         af_str = f" | Audio Features: {', '.join(af_info)}" if af_info else ""
 
+        art_info = f"Album Art URL: {art_url}\n" if art_url else ""
+        spotify_info = f"Spotify URL: {spotify_url}\n" if spotify_url else ""
+
         snippets.append(
             f"Track: {track} | Album: {album} ({year}){af_str}\n"
+            f"{art_info}"
+            f"{spotify_info}"
             f"Drake's Personal Reflection / Match Rationale: {rationale}\n"
             f"Lyrics:\n{quotes}\n"
         )
@@ -935,7 +1313,9 @@ def response_formatter_node(state: AgentState) -> Dict[str, Any]:
         "Attribution & Structuring Rules:\n"
         "1. Opening Reflection: Begin with a direct, personal response synthesizing the theme based on Drake's reasoning analysis.\n"
         "2. Song-by-Song Breakdown: For each retrieved track:\n"
-        "   - Mention the Track Name, Album, and Year.\n"
+        "   - Mention the Track Name, Album, and Year in a markdown heading (e.g. ### **Track Name** — *Album* (Year)).\n"
+        "   - If an Album Art URL is provided, include the artwork image immediately under the heading: ![Album Cover](Album Art URL)\n"
+        "   - If a Spotify URL is provided, include the link: [▶ Listen on Spotify](Spotify URL)\n"
         "   - Highlight its musical acoustics (e.g. valence, tempo BPM, energy) alongside the emotional tone.\n"
         "   - Quote the most resonant lyric lines from the provided stanzas.\n"
         "   - Explicitly detail Drake's personal commentary ('Why it hits') using the match rationale.\n"
@@ -968,8 +1348,13 @@ def response_formatter_node(state: AgentState) -> Dict[str, Any]:
         lines.append("Here is the breakdown of the matching tracks, acoustics, and lyrics:\n")
         for src in sources:
             rel_year = src["release_date"][:4] if src["release_date"] else "Unknown"
-            lines.append(f"### **{src['track_name']}** — *{src['album_name']}* ({rel_year})")
+            lines.append(f"### **{src['track_name']}** — *{src['album_name']}* ({rel_year})\n")
             
+            if src.get("album_art_url"):
+                lines.append(f"![{src['album_name']}]({src['album_art_url']})\n")
+            if src.get("spotify_url"):
+                lines.append(f"[▶ Listen on Spotify]({src['spotify_url']})\n")
+
             # Audio feature badges in fallback
             af_badges = []
             if src.get("valence") is not None:
@@ -989,10 +1374,10 @@ def response_formatter_node(state: AgentState) -> Dict[str, Any]:
             track_rationale = src.get("match_rationale")
             if track_rationale:
                 lines.append(f"**Drake's Reflection:** {track_rationale}\n")
-
-            if src.get("spotify_url"):
-                lines.append(f"[Listen on Spotify]({src['spotify_url']})\n")
         final_text = "\n".join(lines)
+
+    # Post-process to guarantee artwork images and Spotify links are integrated
+    final_text = _integrate_artwork_and_links(final_text, sources)
 
     # Compile unified agent trace
     mf = state.get("metadata_filters", {}) or {}
@@ -1020,6 +1405,12 @@ def response_formatter_node(state: AgentState) -> Dict[str, Any]:
                 "release_year_after": mf.get("release_year_after"),
                 "album_name": mf.get("album_name")
             }
+        },
+        "sql_generation": {
+            "query": state.get("generated_sql") or "",
+            "strategy": state.get("sql_explanation") or "",
+            "query_type": state.get("query_type") or "hybrid_semantic",
+            "params": state.get("sql_params") or {}
         },
         "pulled_songs": state.get("pulled_tracks", []),
         "vetting_agent": {
@@ -1049,6 +1440,12 @@ def out_of_scope_node(state: AgentState) -> Dict[str, Any]:
             "semantic_query": None,
             "audio_feature_creation": {"filters": {}, "targets": {}, "sort_by": None},
             "metadata_limits": {"limit": 0, "personal_feel": None, "release_year_before": None, "release_year_after": None, "album_name": None}
+        },
+        "sql_generation": {
+            "query": "N/A - Out of scope query",
+            "strategy": "Query was determined to be out of scope, bypassing SQL generation.",
+            "query_type": "none",
+            "params": {}
         },
         "pulled_songs": [],
         "vetting_agent": {
